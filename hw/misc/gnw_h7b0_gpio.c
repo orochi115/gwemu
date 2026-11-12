@@ -188,6 +188,15 @@ static void gnw_h7b0_gpio_set_pin(GnwH7B0GpioState *s, int port,
     }
 }
 
+void gnw_h7b0_gpio_set_power(GnwH7B0GpioState *s, bool usb, bool charging)
+{
+    s->power_input = true;
+    s->usb_power = usb;
+    s->charging = charging;
+    gnw_h7b0_gpio_set_pin(s, 0, 1u << 2, usb);
+    gnw_h7b0_gpio_set_pin(s, 4, 1u << 7, charging);
+}
+
 static bool gnw_h7b0_gpio_try_unlock_handoff(GnwH7B0GpioState *s,
                                              bool power_edge,
                                              bool *stock_itcm_ready)
@@ -523,6 +532,9 @@ static void gnw_h7b0_gpio_reset(DeviceState *dev)
 
     /* BQ24072 PGOOD is active-low PA2 on the shared board pinout. */
     s->regs[(0 * GNW_H7B0_GPIO_PORT_SIZE + GNW_H7B0_GPIO_IDR_OFFSET) >> 2] &= ~(1u << 2);
+    if (s->power_input) {
+        gnw_h7b0_gpio_set_power(s, s->usb_power, s->charging);
+    }
 }
 
 static uint64_t gnw_h7b0_gpio_read(void *opaque, hwaddr addr,

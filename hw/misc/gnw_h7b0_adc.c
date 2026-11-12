@@ -256,15 +256,25 @@ static void gnw_h7b0_adc_update_kernel(GnwH7B0AdcState *s)
     }
 }
 
+void gnw_h7b0_adc_set_battery(GnwH7B0AdcState *s, uint16_t raw)
+{
+    s->battery_input = true;
+    s->battery_raw = raw;
+}
+
 static uint32_t gnw_h7b0_adc_result(GnwH7B0AdcState *s, hwaddr base,
                                      unsigned rank)
 {
     unsigned channel;
 
-    if (base == GNW_H7B0_ADC_INSTANCE_STRIDE &&
-        gnw_h7b0_adc_rank_channel(s, base, rank, &channel) &&
-        channel == ADC_CHANNEL_VREFINT) {
-        return GNW_H7B0_ADC_VREFINT_RAW;
+    if (gnw_h7b0_adc_rank_channel(s, base, rank, &channel)) {
+        if (base == GNW_H7B0_ADC_INSTANCE_STRIDE &&
+            channel == ADC_CHANNEL_VREFINT) {
+            return GNW_H7B0_ADC_VREFINT_RAW;
+        }
+        if (s->battery_input && channel == 4) {
+            return s->battery_raw;
+        }
     }
     return GNW_H7B0_ADC_FULL_BATTERY_RAW;
 }
@@ -720,7 +730,9 @@ static void gnw_h7b0_adc_write(void *opaque, hwaddr addr,
             uint32_t sq1 = (sqr1 & ADC_SQR1_SQ1_MASK) >> ADC_SQR1_SQ1_SHIFT;
             uint32_t dr_value = (sq1 == ADC_CHANNEL_VREFINT)
                                      ? GNW_H7B0_ADC_VREFINT_RAW
-                                     : GNW_H7B0_ADC_FULL_BATTERY_RAW;
+                                     : (s->battery_input && sq1 == 4)
+                                       ? s->battery_raw
+                                       : GNW_H7B0_ADC_FULL_BATTERY_RAW;
 
             s->regs[(instance_base + GNW_H7B0_ADC_DR) >> 2] = dr_value;
             s->regs[(instance_base + GNW_H7B0_ADC_ISR) >> 2] |= ADC_ISR_EOC;

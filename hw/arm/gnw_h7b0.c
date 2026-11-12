@@ -37,6 +37,8 @@
 #include "hw/arm/boot.h"
 #include "hw/arm/machines-qom.h"
 #include "gnw_h7b0_desktop.h"
+#include "gnw_h7b0_power.h"
+#include "qapi/visitor.h"
 
 /*
  * Was 280MHz (the datasheet's stated max) as a placeholder guess -- but
@@ -75,6 +77,7 @@ struct GnwH7B0MachineState {
     char *session_lock;
     int session_lock_fd;
     bool initialized;
+    GnwH7B0Power power;
 };
 
 static void gnw_h7b0_init(MachineState *machine)
@@ -118,6 +121,7 @@ static void gnw_h7b0_init(MachineState *machine)
     }
 
     sysbus_realize_and_unref(SYS_BUS_DEVICE(dev), &error_fatal);
+    gnw_h7b0_power_start(&s->power, GNW_H7B0_SOC(dev));
 
     armv7m_load_kernel(ARM_CPU(first_cpu),
                         machine->kernel_filename,
@@ -158,6 +162,83 @@ static void gnw_h7b0_set_##field(Object *obj, const char *value, Error **errp) \
 DESKTOP_STRING_PROPERTY(frame_endpoint, "frame-endpoint")
 DESKTOP_STRING_PROPERTY(session_lock, "session-lock")
 
+static bool gnw_h7b0_get_power_model(Object *obj, Error **errp)
+{
+    return GNW_H7B0_MACHINE(obj)->power.enabled;
+}
+
+static void gnw_h7b0_set_power_model(Object *obj, bool value, Error **errp)
+{
+    GnwH7B0MachineState *s = GNW_H7B0_MACHINE(obj);
+    if (s->initialized) {
+        error_setg(errp, "power-model can only be set before machine initialization");
+        return;
+    }
+    s->power.enabled = value;
+}
+
+static bool gnw_h7b0_get_usb(Object *obj, Error **errp)
+{
+    return GNW_H7B0_MACHINE(obj)->power.usb;
+}
+
+static void gnw_h7b0_set_usb(Object *obj, bool value, Error **errp)
+{
+    GnwH7B0MachineState *s = GNW_H7B0_MACHINE(obj);
+    if (s->initialized && !s->power.enabled) {
+        error_setg(errp, "usb-power requires power-model=on");
+        return;
+    }
+    gnw_h7b0_power_set_usb(&s->power, value);
+}
+
+static void gnw_h7b0_get_battery(Object *obj, Visitor *v,
+                                const char *name, void *opaque, Error **errp)
+{
+    visit_type_uint32(v, name, &GNW_H7B0_MACHINE(obj)->power.battery, errp);
+}
+
+static void gnw_h7b0_set_battery(Object *obj, Visitor *v,
+                                const char *name, void *opaque, Error **errp)
+{
+    GnwH7B0MachineState *s = GNW_H7B0_MACHINE(obj);
+    uint32_t value;
+    if (!visit_type_uint32(v, name, &value, errp)) {
+        return;
+    }
+    if (value > 100) {
+        error_setg(errp, "battery must be 0..100");
+        return;
+    }
+    if (s->initialized && !s->power.enabled) {
+        error_setg(errp, "battery requires power-model=on");
+        return;
+    }
+    gnw_h7b0_power_set_battery(&s->power, value);
+}
+
+#define POWER_PERIOD_PROPERTY(field, property) \
+static void gnw_h7b0_get_##field(Object *obj, Visitor *v, \
+                                 const char *name, void *opaque, Error **errp) \
+{ \
+    visit_type_uint32(v, name, &GNW_H7B0_MACHINE(obj)->power.field, errp); \
+} \
+static void gnw_h7b0_set_##field(Object *obj, Visitor *v, \
+                                 const char *name, void *opaque, Error **errp) \
+{ \
+    GnwH7B0MachineState *s = GNW_H7B0_MACHINE(obj); \
+    uint32_t value; \
+    if (!visit_type_uint32(v, name, &value, errp)) { return; } \
+    if (s->initialized) { \
+        error_setg(errp, property " can only be set before machine initialization"); \
+        return; \
+    } \
+    s->power.field = value; \
+}
+
+POWER_PERIOD_PROPERTY(battery_life_min, "battery-life-min")
+POWER_PERIOD_PROPERTY(charge_time_min, "charge-time-min")
+
 static void gnw_h7b0_machine_class_init(ObjectClass *oc, const void *data)
 {
     gnw_h7b0_machine_init(MACHINE_CLASS(oc));
@@ -165,11 +246,27 @@ static void gnw_h7b0_machine_class_init(ObjectClass *oc, const void *data)
                                  gnw_h7b0_set_frame_endpoint);
     object_class_property_add_str(oc, "session-lock", gnw_h7b0_get_session_lock,
                                  gnw_h7b0_set_session_lock);
+    object_class_property_add_bool(oc, "power-model", gnw_h7b0_get_power_model,
+                                  gnw_h7b0_set_power_model);
+    object_class_property_add_bool(oc, "usb-power", gnw_h7b0_get_usb,
+                                  gnw_h7b0_set_usb);
+    object_class_property_add(oc, "battery", "uint32", gnw_h7b0_get_battery,
+                             gnw_h7b0_set_battery, NULL, NULL);
+    object_class_property_add(oc, "battery-life-min", "uint32",
+                             gnw_h7b0_get_battery_life_min,
+                             gnw_h7b0_set_battery_life_min, NULL, NULL);
+    object_class_property_add(oc, "charge-time-min", "uint32",
+                             gnw_h7b0_get_charge_time_min,
+                             gnw_h7b0_set_charge_time_min, NULL, NULL);
 }
 
 static void gnw_h7b0_machine_instance_init(Object *obj)
 {
     GNW_H7B0_MACHINE(obj)->session_lock_fd = -1;
+    GNW_H7B0_MACHINE(obj)->power.battery = 100;
+    GNW_H7B0_MACHINE(obj)->power.level = 100;
+    GNW_H7B0_MACHINE(obj)->power.battery_life_min = 480;
+    GNW_H7B0_MACHINE(obj)->power.charge_time_min = 180;
 }
 
 static void gnw_h7b0_machine_finalize(Object *obj)
@@ -177,6 +274,7 @@ static void gnw_h7b0_machine_finalize(Object *obj)
     GnwH7B0MachineState *s = GNW_H7B0_MACHINE(obj);
     g_free(s->frame_endpoint);
     g_free(s->session_lock);
+    gnw_h7b0_power_free(&s->power);
     if (s->session_lock_fd >= 0) {
         close(s->session_lock_fd);
     }

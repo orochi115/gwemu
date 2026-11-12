@@ -173,6 +173,9 @@ struct GnwH7B0AdcState {
     GnwH7B0DmaState *dma;
     GnwH7B0RccState *rcc;
     bool timing_mode;
+    /* External channel4 input survives peripheral resets. Disabled by default. */
+    bool battery_input;
+    uint16_t battery_raw;
 
     /* Timer state is indexed ADC1=0, ADC2=1. Timers themselves are rebuilt
      * from the migrated remaining conversion phase in post_load. */
@@ -199,5 +202,6 @@ struct GnwH7B0AdcState {
 void gnw_h7b0_adc_set_dma(GnwH7B0AdcState *s, GnwH7B0DmaState *dma);
 /* Connect the combined ADC1/ADC2 block to RCC after both devices exist. */
 void gnw_h7b0_adc_set_rcc(GnwH7B0AdcState *s, GnwH7B0RccState *rcc);
+void gnw_h7b0_adc_set_battery(GnwH7B0AdcState *s, uint16_t raw);
 
 #endif

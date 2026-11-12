@@ -37,5 +37,24 @@ Parent regressions in `tests/test_gwemu_desktop.py` check real composed pixels,
 partial ACKs, invalid endpoints, UID bytes, locking, and nonzero/zero WAV PCM
 across mute and voice recreation. The preview is explicitly selected in the
 parent desktop and uses independent working images. Power controls, complete
-instant states, cold boot/software SPI, and full firmware/audio acceptance are
+instant states, supply-domain cold boot/software SPI, and full firmware/audio acceptance are
 still pending. Track them in the parent migration plan.
+
+The next preview batch adds an explicit board-input approximation:
+`-M gnw-h7b0,power-model=on,battery=50,usb-power=off,battery-life-min=480,charge-time-min=180`.
+Power modeling defaults off, retaining upstream's fixed full ADC/PGOOD input.
+When enabled, QOM `/machine` `battery` (0..100) and `usb-power` are writable;
+the enable flag and periods are startup-only. Channel4 on ADC1/2 reads the
+Retro-Go BQ24072 driver's 11000..13000 scale, PA2 PGOOD and PE7 CHG are
+active-low and propagate through existing EXTI routing. Other ADC channels,
+VREFINT and the existing mode-sensitive PC8 strap keep their behavior.
+GPIO/ADC reset retains these external inputs. Virtual time drives charging
+and draining, with zero periods disabling the respective change.
+
+This does not model battery detachment, power loss at 0percent, charger CE
+current limits, or real battery chemistry. Parent `tests/test_gwemu_power.py`
+also exercises the existing `gnw-cold-cycle` HMP entry, with explicit limits
+on its SRAM/internal-Flash/UID/POWER-timing evidence. Desktop normal shutdown
+freezes guest time, reads the power state, and saves it only after successful
+exit and file synchronization; readback failure still terminates the child
+and reports uncertain saving.

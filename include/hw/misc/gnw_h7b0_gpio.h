@@ -84,6 +84,9 @@ struct GnwH7B0GpioState {
 
     MemoryRegion mmio;
     uint32_t regs[GNW_H7B0_GPIO_SIZE / 4];
+    bool power_input;
+    bool usb_power;
+    bool charging;
     /* Set by the SoC after both devices exist (see gnw_h7b0_soc.c). Used
      * only to notify EXTI of the PA0 (WKUP1, best guess) release edge --
      * see gnw_h7b0_gpio_pa0_release() in gnw_h7b0_gpio.c. */
@@ -134,5 +137,6 @@ void gnw_h7b0_gpio_set_unlock_handoff(GnwH7B0GpioState *s, CPUState *cpu,
 bool gnw_h7b0_gpio_try_boot_handoff(GnwH7B0GpioState *s,
                                     bool *stock_itcm_ready);
 void gnw_timeline_record_quit(void);
+void gnw_h7b0_gpio_set_power(GnwH7B0GpioState *s, bool usb, bool charging);
 
 #endif
