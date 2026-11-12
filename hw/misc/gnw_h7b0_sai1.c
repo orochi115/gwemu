@@ -628,6 +628,8 @@ static void gnw_h7b0_sai1_update_voice(GnwH7B0Sai1State *s)
         s->voice = audio_be_open_out(s->audio_be, s->voice, "gnw-h7b0-sai1",
                                       s, gnw_h7b0_sai1_voice_cb, &as);
         if (s->voice) {
+            audio_be_set_volume_out_lr(s->audio_be, s->voice,
+                                      s->audio_muted, 255, 255);
             audio_be_set_active_out(s->audio_be, s->voice, true);
             s->voice_open = true;
             s->voice_rate_hz = rate;
@@ -817,6 +819,20 @@ static const Property gnw_h7b0_sai1_properties[] = {
     DEFINE_AUDIO_PROPERTIES(GnwH7B0Sai1State, audio_be),
 };
 
+static bool gnw_h7b0_sai1_get_audio_muted(Object *obj, Error **errp)
+{
+    return GNW_H7B0_SAI1(obj)->audio_muted;
+}
+
+static void gnw_h7b0_sai1_set_audio_muted(Object *obj, bool muted, Error **errp)
+{
+    GnwH7B0Sai1State *s = GNW_H7B0_SAI1(obj);
+    s->audio_muted = muted;
+    if (s->voice) {
+        audio_be_set_volume_out_lr(s->audio_be, s->voice, muted, 255, 255);
+    }
+}
+
 static void gnw_h7b0_sai1_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
@@ -825,6 +841,9 @@ static void gnw_h7b0_sai1_class_init(ObjectClass *klass, const void *data)
     dc->unrealize = gnw_h7b0_sai1_unrealize;
     device_class_set_legacy_reset(dc, gnw_h7b0_sai1_reset);
     device_class_set_props(dc, gnw_h7b0_sai1_properties);
+    object_class_property_add_bool(klass, "audio-muted",
+                                   gnw_h7b0_sai1_get_audio_muted,
+                                   gnw_h7b0_sai1_set_audio_muted);
 }
 
 static const TypeInfo gnw_h7b0_sai1_info = {

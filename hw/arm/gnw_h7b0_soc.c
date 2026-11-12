@@ -648,6 +648,23 @@ static void gnw_h7b0_soc_realize(DeviceState *dev_soc, Error **errp)
                    s->extflash_chip ? s->extflash_chip : "(null)");
         return;
     }
+    uint8_t uid_bytes[12];
+    if (s->device_uid) {
+        if (strlen(s->device_uid) != sizeof(uid_bytes) * 2) {
+            error_setg(errp, "UID must contain exactly 24 hexadecimal digits");
+            return;
+        }
+        for (size_t i = 0; i < sizeof(uid_bytes) * 2; i++) {
+            if (!g_ascii_isxdigit(s->device_uid[i])) {
+                error_setg(errp, "UID must contain exactly 24 hexadecimal digits");
+                return;
+            }
+        }
+        for (size_t i = 0; i < sizeof(uid_bytes); i++) {
+            uid_bytes[i] = g_ascii_xdigit_value(s->device_uid[i * 2]) * 16 +
+                           g_ascii_xdigit_value(s->device_uid[i * 2 + 1]);
+        }
+    }
     s->extflash_size = nor_chip->size_bytes;
 
     if (s->cpu_cache_dma2d_v2_profile) {
@@ -874,6 +891,9 @@ static void gnw_h7b0_soc_realize(DeviceState *dev_soc, Error **errp)
         uid_ptr[0] = 0x47575145; /* "GWQE" */
         uid_ptr[1] = 0x4d55004d; /* "MU\0M" */
         uid_ptr[2] = 0x00000001;
+        if (s->device_uid) {
+            memcpy(uid_ptr, uid_bytes, sizeof(uid_bytes));
+        }
     }
     /*
      * DBGMCU (CoreSight debug unit): not modeled as a real device, same
@@ -1543,6 +1563,7 @@ static const Property gnw_h7b0_soc_properties[] = {
      * the doc comment on GnwH7B0State's bank1_image/bank2_image/
      * extflash_image fields in gnw_h7b0_soc.h.
      */
+    DEFINE_PROP_STRING("uid", GnwH7B0State, device_uid),
     DEFINE_PROP_STRING("bank1-image", GnwH7B0State, bank1_image),
     DEFINE_PROP_STRING("bank2-image", GnwH7B0State, bank2_image),
     DEFINE_PROP_STRING("extflash-image", GnwH7B0State, extflash_image),

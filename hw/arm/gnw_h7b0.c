@@ -36,6 +36,7 @@
 #include "hw/arm/gnw_h7b0_soc.h"
 #include "hw/arm/boot.h"
 #include "hw/arm/machines-qom.h"
+#include "gnw_h7b0_desktop.h"
 
 /*
  * Was 280MHz (the datasheet's stated max) as a placeholder guess -- but
@@ -65,10 +66,26 @@
  */
 #define SYSCLK_FRQ 340512000ULL
 
+#define TYPE_GNW_H7B0_MACHINE MACHINE_TYPE_NAME("gnw-h7b0")
+OBJECT_DECLARE_SIMPLE_TYPE(GnwH7B0MachineState, GNW_H7B0_MACHINE)
+
+struct GnwH7B0MachineState {
+    MachineState parent_obj;
+    char *frame_endpoint;
+    char *session_lock;
+    int session_lock_fd;
+    bool initialized;
+};
+
 static void gnw_h7b0_init(MachineState *machine)
 {
     DeviceState *dev;
     Clock *sysclk;
+    GnwH7B0MachineState *s = GNW_H7B0_MACHINE(machine);
+
+    s->initialized = true;
+    /* Acquire before the SoC can pad or mmap any writable Flash image. */
+    s->session_lock_fd = gnw_h7b0_desktop_lock(s->session_lock, &error_fatal);
 
     sysclk = clock_new(OBJECT(machine), "SYSCLK");
     /*
@@ -105,6 +122,8 @@ static void gnw_h7b0_init(MachineState *machine)
     armv7m_load_kernel(ARM_CPU(first_cpu),
                         machine->kernel_filename,
                         FLASH_BANK1_BASE_ADDRESS, FLASH_BANK_SIZE);
+
+    gnw_h7b0_desktop_start(s->frame_endpoint, &error_fatal);
 }
 
 static void gnw_h7b0_machine_init(MachineClass *mc)
@@ -120,4 +139,62 @@ static void gnw_h7b0_machine_init(MachineClass *mc)
     machine_add_audiodev_property(mc);
 }
 
-DEFINE_MACHINE_ARM("gnw-h7b0", gnw_h7b0_machine_init)
+#define DESKTOP_STRING_PROPERTY(field, name) \
+static char *gnw_h7b0_get_##field(Object *obj, Error **errp) \
+{ \
+    return g_strdup(GNW_H7B0_MACHINE(obj)->field); \
+} \
+static void gnw_h7b0_set_##field(Object *obj, const char *value, Error **errp) \
+{ \
+    GnwH7B0MachineState *s = GNW_H7B0_MACHINE(obj); \
+    if (s->initialized) { \
+        error_setg(errp, name " can only be set before machine initialization"); \
+        return; \
+    } \
+    g_free(s->field); \
+    s->field = g_strdup(value); \
+}
+
+DESKTOP_STRING_PROPERTY(frame_endpoint, "frame-endpoint")
+DESKTOP_STRING_PROPERTY(session_lock, "session-lock")
+
+static void gnw_h7b0_machine_class_init(ObjectClass *oc, const void *data)
+{
+    gnw_h7b0_machine_init(MACHINE_CLASS(oc));
+    object_class_property_add_str(oc, "frame-endpoint", gnw_h7b0_get_frame_endpoint,
+                                 gnw_h7b0_set_frame_endpoint);
+    object_class_property_add_str(oc, "session-lock", gnw_h7b0_get_session_lock,
+                                 gnw_h7b0_set_session_lock);
+}
+
+static void gnw_h7b0_machine_instance_init(Object *obj)
+{
+    GNW_H7B0_MACHINE(obj)->session_lock_fd = -1;
+}
+
+static void gnw_h7b0_machine_finalize(Object *obj)
+{
+    GnwH7B0MachineState *s = GNW_H7B0_MACHINE(obj);
+    g_free(s->frame_endpoint);
+    g_free(s->session_lock);
+    if (s->session_lock_fd >= 0) {
+        close(s->session_lock_fd);
+    }
+}
+
+static const TypeInfo gnw_h7b0_machine_info = {
+    .name = TYPE_GNW_H7B0_MACHINE,
+    .parent = TYPE_MACHINE,
+    .instance_size = sizeof(GnwH7B0MachineState),
+    .instance_init = gnw_h7b0_machine_instance_init,
+    .instance_finalize = gnw_h7b0_machine_finalize,
+    .class_init = gnw_h7b0_machine_class_init,
+    .interfaces = arm_machine_interfaces,
+};
+
+static void gnw_h7b0_register_machine(void)
+{
+    type_register_static(&gnw_h7b0_machine_info);
+}
+
+type_init(gnw_h7b0_register_machine)

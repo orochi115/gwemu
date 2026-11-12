@@ -70,6 +70,8 @@ struct GnwH7B0Sai1State {
     AudioBackend *audio_be;
     SWVoiceOut *voice;
     bool voice_open;
+    /* Host presentation setting; guest DMA and sample timing remain active. */
+    bool audio_muted;
     Notifier exit_notifier;
     bool exit_notifier_registered;
     /* Host presentation rate currently programmed into voice. */

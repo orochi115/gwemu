@@ -628,6 +628,8 @@ struct GnwH7B0State {
      * original span needed to decode GnWManager's staged payload after the
      * emulator process is fully stopped and relaunched.
      */
+    /* Optional 96-bit UID in raw memory byte order (24 hex digits). */
+    char *device_uid;
     char *bank1_image;
     char *bank2_image;
     char *extflash_image;
