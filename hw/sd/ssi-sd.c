@@ -107,6 +107,10 @@ static uint32_t ssi_sd_transfer(SSIPeripheral *dev, uint32_t val)
     if (s->mode >= SSI_SD_PREP_DATA && s->mode <= SSI_SD_DATA_CRC16) {
         if (val == 0x4c) {
             s->mode = SSI_SD_CMD;
+            /* CMD12 can interrupt a partially clocked data block. Do not
+             * carry its byte count or CRC into the next read command. */
+            s->read_bytes = 0;
+            s->crc16 = 0;
             /* There must be at least one byte delay before the card responds */
             s->stopping = 1;
         }
