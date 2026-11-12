@@ -145,6 +145,17 @@ static void gnw_h7b0_machine_init(MachineClass *mc)
     machine_add_audiodev_property(mc);
 }
 
+static bool gnw_h7b0_can_run(MachineState *machine, Error **errp)
+{
+    GnwH7B0Power *power = &GNW_H7B0_MACHINE(machine)->power;
+
+    if (power->transitioning || !gnw_h7b0_power_is_supplied(power)) {
+        error_setg(errp, "Game & Watch cannot run without an available power supply");
+        return false;
+    }
+    return true;
+}
+
 #define DESKTOP_STRING_PROPERTY(field, name) \
 static char *gnw_h7b0_get_##field(Object *obj, Error **errp) \
 { \
@@ -212,7 +223,28 @@ static void gnw_h7b0_set_usb(Object *obj, bool value, Error **errp)
         error_setg(errp, "usb-power requires power-model=on");
         return;
     }
-    gnw_h7b0_power_set_usb(&s->power, value);
+    gnw_h7b0_power_set_usb(&s->power, value, errp);
+}
+
+static bool gnw_h7b0_get_present(Object *obj, Error **errp)
+{
+    return GNW_H7B0_MACHINE(obj)->power.battery_present;
+}
+
+static void gnw_h7b0_set_present(Object *obj, bool value, Error **errp)
+{
+    GnwH7B0MachineState *s = GNW_H7B0_MACHINE(obj);
+
+    if (s->initialized && !s->power.enabled) {
+        error_setg(errp, "battery-present requires power-model=on");
+        return;
+    }
+    gnw_h7b0_power_set_present(&s->power, value, errp);
+}
+
+static bool gnw_h7b0_get_powered(Object *obj, Error **errp)
+{
+    return gnw_h7b0_power_is_supplied(&GNW_H7B0_MACHINE(obj)->power);
 }
 
 static void gnw_h7b0_get_battery(Object *obj, Visitor *v,
@@ -265,6 +297,7 @@ POWER_PERIOD_PROPERTY(charge_time_min, "charge-time-min")
 static void gnw_h7b0_machine_class_init(ObjectClass *oc, const void *data)
 {
     gnw_h7b0_machine_init(MACHINE_CLASS(oc));
+    MACHINE_CLASS(oc)->can_run = gnw_h7b0_can_run;
     object_class_property_add_str(oc, "frame-endpoint", gnw_h7b0_get_frame_endpoint,
                                  gnw_h7b0_set_frame_endpoint);
     object_class_property_add_str(oc, "session-lock", gnw_h7b0_get_session_lock,
@@ -275,6 +308,9 @@ static void gnw_h7b0_machine_class_init(ObjectClass *oc, const void *data)
                                   gnw_h7b0_set_power_model);
     object_class_property_add_bool(oc, "usb-power", gnw_h7b0_get_usb,
                                   gnw_h7b0_set_usb);
+    object_class_property_add_bool(oc, "battery-present", gnw_h7b0_get_present,
+                                  gnw_h7b0_set_present);
+    object_class_property_add_bool(oc, "powered", gnw_h7b0_get_powered, NULL);
     object_class_property_add(oc, "battery", "uint32", gnw_h7b0_get_battery,
                              gnw_h7b0_set_battery, NULL, NULL);
     object_class_property_add(oc, "battery-life-min", "uint32",
@@ -290,6 +326,7 @@ static void gnw_h7b0_machine_instance_init(Object *obj)
     GNW_H7B0_MACHINE(obj)->session_lock_fd = -1;
     GNW_H7B0_MACHINE(obj)->sd_wiring = g_strdup("spi1");
     GNW_H7B0_MACHINE(obj)->power.battery = 100;
+    GNW_H7B0_MACHINE(obj)->power.battery_present = true;
     GNW_H7B0_MACHINE(obj)->power.level = 100;
     GNW_H7B0_MACHINE(obj)->power.battery_life_min = 480;
     GNW_H7B0_MACHINE(obj)->power.charge_time_min = 180;

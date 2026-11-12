@@ -605,6 +605,7 @@ struct GnwH7B0State {
     unsigned startup_handoff_attempts;
     bool initial_boot_handoff_pending;
     bool ui_reset_to_fault_pending;
+    bool supply_present;
 
     Clock *sysclk;
     /* SysTick's external source is HCLK / 8, distinct from cpuclk when
@@ -659,6 +660,9 @@ struct GnwH7B0State {
 
 /* UI action: clear volatile device state, reset the SoC, then press POWER. */
 void gnw_h7b0_soc_cold_power_cycle(void);
+
+/* Board supply transition; caller has synchronously stopped the vCPUs. */
+void gnw_h7b0_soc_set_supply(GnwH7B0State *s, bool present);
 
 /* UI Reset on an RDP-locked device reproduces the captured reset fault. */
 void gnw_h7b0_soc_ui_reset(void);

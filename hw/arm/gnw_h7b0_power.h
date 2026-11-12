@@ -8,6 +8,8 @@
 typedef struct GnwH7B0Power {
     bool enabled;
     bool usb;
+    bool battery_present;
+    bool transitioning;
     uint32_t battery;
     uint32_t battery_life_min;
     uint32_t charge_time_min;
@@ -19,7 +21,9 @@ typedef struct GnwH7B0Power {
 
 void gnw_h7b0_power_start(GnwH7B0Power *s, GnwH7B0State *soc);
 void gnw_h7b0_power_set_battery(GnwH7B0Power *s, uint32_t level);
-void gnw_h7b0_power_set_usb(GnwH7B0Power *s, bool usb);
+bool gnw_h7b0_power_is_supplied(const GnwH7B0Power *s);
+void gnw_h7b0_power_set_usb(GnwH7B0Power *s, bool usb, Error **errp);
+void gnw_h7b0_power_set_present(GnwH7B0Power *s, bool present, Error **errp);
 void gnw_h7b0_power_free(GnwH7B0Power *s);
 
 #endif

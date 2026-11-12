@@ -1084,6 +1084,12 @@ static void handle_thread_alive(GArray *params, void *user_ctx)
 
 static void handle_continue(GArray *params, void *user_ctx)
 {
+#ifndef CONFIG_USER_ONLY
+    if (!machine_can_run(current_machine, NULL)) {
+        gdb_put_packet("E22");
+        return;
+    }
+#endif
     if (params->len) {
         gdb_set_cpu_pc(gdb_get_cmd_param(params, 0)->val_ull);
     }
@@ -1095,6 +1101,13 @@ static void handle_continue(GArray *params, void *user_ctx)
 static void handle_cont_with_sig(GArray *params, void *user_ctx)
 {
     unsigned long signal = 0;
+
+#ifndef CONFIG_USER_ONLY
+    if (!machine_can_run(current_machine, NULL)) {
+        gdb_put_packet("E22");
+        return;
+    }
+#endif
 
     /*
      * Note: C sig;[addr] is currently unsupported and we simply
@@ -1365,6 +1378,12 @@ static void handle_read_all_regs(GArray *params, void *user_ctx)
 
 static void handle_step(GArray *params, void *user_ctx)
 {
+#ifndef CONFIG_USER_ONLY
+    if (!machine_can_run(current_machine, NULL)) {
+        gdb_put_packet("E22");
+        return;
+    }
+#endif
     if (params->len) {
         gdb_set_cpu_pc(gdb_get_cmd_param(params, 0)->val_ull);
     }
@@ -1409,6 +1428,13 @@ static void handle_v_cont_query(GArray *params, void *user_ctx)
 static void handle_v_cont(GArray *params, void *user_ctx)
 {
     int res;
+
+#ifndef CONFIG_USER_ONLY
+    if (!machine_can_run(current_machine, NULL)) {
+        gdb_put_packet("E22");
+        return;
+    }
+#endif
 
     if (!params->len) {
         return;

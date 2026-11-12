@@ -815,6 +815,12 @@ int vm_prepare_start(bool step_pending)
     RunState state = vm_was_suspended ? RUN_STATE_SUSPENDED : RUN_STATE_RUNNING;
     RunState requested;
 
+    /* A board execution gate also applies to GDB per-CPU resume/step.
+     * Check before consuming stop requests, sending RESUME or enabling time. */
+    if (!machine_can_run(current_machine, NULL)) {
+        return -1;
+    }
+
     qemu_vmstop_requested(&requested);
     if (runstate_is_running() && requested == RUN_STATE__MAX) {
         return -1;

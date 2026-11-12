@@ -51,7 +51,8 @@ VREFINT and the existing mode-sensitive PC8 strap keep their behavior.
 GPIO/ADC reset retains these external inputs. Virtual time drives charging
 and draining, with zero periods disabling the respective change.
 
-This does not model battery detachment, power loss at 0percent, charger CE
+The initial input-only batch did not model battery detachment, power loss at
+0percent, charger CE
 current limits, or real battery chemistry. Parent `tests/test_gwemu_power.py`
 also exercises the existing `gnw-cold-cycle` HMP entry, with explicit limits
 on its SRAM/internal-Flash/UID/POWER-timing evidence. Desktop normal shutdown
@@ -114,9 +115,44 @@ copied-ROM acceptance is in `tests/test_gwemu_cold_firmware.py`. After backup
 state loss, patched Zelda OFW requires completing its PRESS TIME screen
 before the Left+GAME patch can enter Retro-Go again.
 
-This remains an explicit in-process reset approximation with a delayed
-POWER press. It does not provide a battery-connected property, sustained
-off-state CPU gating, physical RTC/VBAT behavior or protection-transition
-acceptance. Existing direct SRAM memset/ITCM memcpy translation-cache
+That cold-only batch remained an explicit in-process reset approximation
+with a delayed POWER press. It did not provide battery presence or sustained
+off-state CPU gating. Physical RTC/VBAT behavior and protection transitions
+remain unverified. Existing direct SRAM memset/ITCM memcpy translation-cache
 behavior remains a separate unproven concern; this narrow patch does not
 change it or claim complete cold-start/savestate fidelity.
+
+The opt-in power model now has writable QOM `/machine` `battery-present`
+(default true) and read-only `powered`. Supply availability is battery
+presence OR USB, independently of percentage: connected 0percent still
+counts as a source. With no battery, its saved percentage does not charge or
+drain, ADC channel4 reads zero and CHG is inactive; USB PGOOD retains its
+existing polarity. Switching between redundant sources does not reset.
+
+Losing the final source synchronously stops vCPUs, cancels pending startup
+handoff/POWER pulses and the UI warm-fault request, clears volatile SRAM and
+TAMP, and resets the CPU/peripherals. Restoring a source synchronously cold
+resets and schedules the existing POWER pulse but stays paused: only an
+explicit continue runs firmware. A transition latch closes the execution
+gate before `vm_stop` may release BQL and keeps it closed through reset.
+If VM stop/device flushing reports a failure, the source/reset change stays
+applied and QMP reports the error; it never rolls back to running without
+power. Initial no-supply startup suppresses handoff and clears backup state.
+
+A default-permissive `MachineClass.can_run` check guards the central
+`vm_prepare_start` before RESUME/tick/runstate changes; only this board's
+enabled model vetoes execution. QMP/HMP continue returns a supply error.
+GDB c/s/C/vCont handlers return E22 before arming a step, while detach returns
+one OK and central silent resume denial keeps the device stopped. Debug
+reads and reconnect remain usable while off. An explicit HMP cold cycle
+cannot supply an unpowered device. Parent `tests/test_gwemu_supply.py`
+checks actual TCG SRAM execution, protocol denial, detach/reconnect,
+back-to-back restore/continue, source combinations and unrelated-machine
+compatibility; copied-firmware acceptance remains in the parent.
+
+This is a discrete source/execution model. It does not implement charger CE
+or current limits, voltage/chemistry cutoffs, always-on RTC/VBAT domains,
+physical protection transitions or sudden-loss SD consistency. QEMU virtual
+time pauses while unpowered. Debugger memory writes remain available as
+debug operations. Full VMState/Flash rollback and desktop battery controls
+are separate work.

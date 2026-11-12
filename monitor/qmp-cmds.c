@@ -31,6 +31,7 @@
 #include "qapi/type-helpers.h"
 #include "hw/mem/memory-device.h"
 #include "hw/intc/intc.h"
+#include "hw/core/boards.h"
 #include "migration/misc.h"
 
 NameInfo *qmp_query_name(Error **errp)
@@ -68,6 +69,10 @@ void qmp_cont(Error **errp)
     BlockBackend *blk;
     BlockJob *job;
     Error *local_err = NULL;
+
+    if (!machine_can_run(current_machine, errp)) {
+        return;
+    }
 
     /* if there is a dump in background, we should wait until the dump
      * finished */

@@ -38,6 +38,17 @@
 #include "hw/acpi/generic_event_device.h"
 #include "qemu/audio.h"
 
+bool machine_can_run(MachineState *machine, Error **errp)
+{
+    MachineClass *mc;
+
+    if (!machine) {
+        return true;
+    }
+    mc = MACHINE_GET_CLASS(machine);
+    return !mc->can_run || mc->can_run(machine, errp);
+}
+
 GlobalProperty hw_compat_10_2[] = {
     { "scsi-block", "migrate-pr", "off" },
     { "isa-cirrus-vga", "global-vmstate", "true" },

@@ -110,6 +110,9 @@ static void gnw_h7b0_cold_power_on(void *opaque)
 {
     GnwH7B0State *s = opaque;
 
+    if (!s->supply_present) {
+        return;
+    }
     gnw_h7b0_gpio_inject_button(&s->gpio,
                                 gnw_h7b0_gpio_button_from_name("pwr"), true);
     timer_mod(s->cold_power_release_timer,
@@ -121,6 +124,9 @@ static void gnw_h7b0_startup_handoff(void *opaque)
     GnwH7B0State *s = opaque;
     bool stock_itcm_ready;
 
+    if (!s->supply_present) {
+        return;
+    }
     if (gnw_h7b0_gpio_try_boot_handoff(&s->gpio, &stock_itcm_ready) ||
         stock_itcm_ready) {
         return;
@@ -134,6 +140,13 @@ static void gnw_h7b0_startup_handoff(void *opaque)
 
 static void hmp_gnw_cold_cycle(Monitor *mon, const QDict *qdict)
 {
+    Object *obj = object_resolve_path_type("/machine/soc", TYPE_GNW_H7B0_SOC,
+                                          NULL);
+
+    if (obj && !GNW_H7B0_SOC(obj)->supply_present) {
+        monitor_printf(mon, "GNW cold cycle refused: no power supply\n");
+        return;
+    }
     gnw_h7b0_soc_cold_power_cycle();
     monitor_printf(mon, "GNW cold power cycle requested\n");
 }
@@ -144,19 +157,16 @@ static void hmp_gnw_ui_reset(Monitor *mon, const QDict *qdict)
     monitor_printf(mon, "GNW UI reset requested\n");
 }
 
-void gnw_h7b0_soc_cold_power_cycle(void)
+static void gnw_h7b0_soc_prepare_cold_reset(GnwH7B0State *s)
 {
-    Object *obj = object_resolve_path_type("/machine/soc", TYPE_GNW_H7B0_SOC,
-                                           NULL);
-    GnwH7B0State *s;
-    uint8_t *itcm;
+    uint8_t *itcm = memory_region_get_ram_ptr(&s->itcm);
 
-    if (!obj) {
-        warn_report("gnw-h7b0: cold power cycle requested without a live SoC");
-        return;
-    }
-    s = GNW_H7B0_SOC(obj);
-    itcm = memory_region_get_ram_ptr(&s->itcm);
+    timer_del(s->startup_handoff_timer);
+    timer_del(s->cold_power_on_timer);
+    timer_del(s->cold_power_release_timer);
+    gnw_h7b0_cold_power_release(s);
+    s->initial_boot_handoff_pending = false;
+    s->ui_reset_to_fault_pending = false;
 
     /* Full power removal clears volatile SRAM banks. Internal/external flash,
      * option bytes, and the factory UID are nonvolatile and retained. */
@@ -173,12 +183,50 @@ void gnw_h7b0_soc_cold_power_cycle(void)
 #undef CLEAR_VOLATILE_RAM
     memcpy(itcm, s->cold_itcm_seed, memory_region_size(&s->itcm));
     gnw_h7b0_tamp_backup_domain_reset(&s->tamp);
+}
+
+static void gnw_h7b0_soc_schedule_power(GnwH7B0State *s)
+{
+    timer_mod(s->cold_power_on_timer,
+              qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + 750 * 1000000LL);
+}
+
+void gnw_h7b0_soc_set_supply(GnwH7B0State *s, bool present)
+{
+    s->supply_present = present;
+    if (!s->cold_itcm_seed) {
+        /* Board initialization precedes the initial reset/loader holds.
+         * Its reset exit will capture the seed and suppress off startup. */
+        return;
+    }
+    gnw_h7b0_soc_prepare_cold_reset(s);
+    qemu_system_reset(SHUTDOWN_CAUSE_HOST_UI);
+    if (present) {
+        gnw_h7b0_soc_schedule_power(s);
+    }
+}
+
+void gnw_h7b0_soc_cold_power_cycle(void)
+{
+    Object *obj = object_resolve_path_type("/machine/soc", TYPE_GNW_H7B0_SOC,
+                                          NULL);
+    GnwH7B0State *s;
+
+    if (!obj) {
+        warn_report("gnw-h7b0: cold power cycle requested without a live SoC");
+        return;
+    }
+    s = GNW_H7B0_SOC(obj);
+    if (!s->supply_present) {
+        warn_report("gnw-h7b0: cold cycle refused without a power supply");
+        return;
+    }
+    gnw_h7b0_soc_prepare_cold_reset(s);
 
     /* Reset the CPU and all peripheral registers, then reapply power and
      * synthesize the user's POWER press after 750 ms of guest time. */
     qemu_system_reset_request(SHUTDOWN_CAUSE_HOST_UI);
-    timer_mod(s->cold_power_on_timer,
-              qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + 750 * 1000000LL);
+    gnw_h7b0_soc_schedule_power(s);
 }
 
 static void gnw_h7b0_soc_reset_exit(Object *obj, ResetType type)
@@ -196,6 +244,16 @@ static void gnw_h7b0_soc_reset_exit(Object *obj, ResetType type)
     if (!s->cold_itcm_seed) {
         s->cold_itcm_seed = g_memdup2(memory_region_get_ram_ptr(&s->itcm),
                                     memory_region_size(&s->itcm));
+    }
+
+    if (!s->supply_present) {
+        s->initial_boot_handoff_pending = false;
+        s->ui_reset_to_fault_pending = false;
+        timer_del(s->startup_handoff_timer);
+        timer_del(s->cold_power_on_timer);
+        timer_del(s->cold_power_release_timer);
+        gnw_h7b0_tamp_backup_domain_reset(&s->tamp);
+        return;
     }
 
     if (s->initial_boot_handoff_pending) {
@@ -259,6 +317,8 @@ void gnw_h7b0_soc_ui_reset(void)
 static void gnw_h7b0_soc_initfn(Object *obj)
 {
     GnwH7B0State *s = GNW_H7B0_SOC(obj);
+
+    s->supply_present = true;
 
     object_initialize_child(obj, "armv7m", &s->armv7m, TYPE_ARMV7M);
     object_initialize_child(obj, "rcc", &s->rcc, TYPE_GNW_H7B0_RCC);

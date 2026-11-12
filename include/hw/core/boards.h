@@ -25,6 +25,9 @@ OBJECT_DECLARE_TYPE(MachineState, MachineClass, MACHINE)
 
 extern MachineState *current_machine;
 
+/* A board may veto guest execution before resume has any side effects. */
+bool machine_can_run(MachineState *machine, Error **errp);
+
 /**
  * machine_default_cpu_type: Return the machine default CPU type.
  * @ms: Machine state
@@ -270,6 +273,7 @@ struct MachineClass {
 
     void (*init)(MachineState *state);
     void (*reset)(MachineState *state, ResetType type);
+    bool (*can_run)(MachineState *state, Error **errp);
     void (*wakeup)(MachineState *state);
     int (*kvm_type)(MachineState *machine, const char *arg);
     int (*get_physical_address_range)(MachineState *machine,
