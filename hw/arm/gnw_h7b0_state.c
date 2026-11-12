@@ -291,6 +291,7 @@ void gnw_h7b0_state_file(GnwH7B0Snapshot *s, const char *path, bool load,
         vm_stop(RUN_STATE_RESTORE_VM);
         gnw_h7b0_gpio_snapshot_quiesce(&s->soc->gpio, true);
         gnw_h7b0_sai1_snapshot_prepare(&s->soc->sai1);
+        gnw_h7b0_jpeg_snapshot_quiesce(&s->soc->jpeg, true);
         qemu_system_reset(SHUTDOWN_CAUSE_SNAPSHOT_LOAD);
         f = qemu_file_new_input(QIO_CHANNEL(payload));
         ret = qemu_loadvm_state(f, errp);
@@ -301,6 +302,7 @@ void gnw_h7b0_state_file(GnwH7B0Snapshot *s, const char *path, bool load,
             gnw_h7b0_otfdec_snapshot_restore(&s->soc->otfdec1);
             gnw_h7b0_otfdec_snapshot_restore(&s->soc->otfdec2);
             gnw_h7b0_sai1_snapshot_restore(&s->soc->sai1);
+            gnw_h7b0_ltdc_snapshot_restore(&s->soc->ltdc);
         }
         if (!ret &&
             (!sync_flash(&s->soc->flash_bank1, s->soc->bank1_image, errp) ||

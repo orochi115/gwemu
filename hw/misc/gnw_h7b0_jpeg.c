@@ -3,6 +3,7 @@
 #include "qemu/log.h"
 #include "qemu/timer.h"
 #include "migration/vmstate.h"
+#include "migration/qemu-file.h"
 #include "hw/core/qdev-properties.h"
 #include "hw/misc/gnw_h7b0_jpeg.h"
 #include "hw/misc/gnw_h7b0_regs_jpeg.h"
@@ -1385,6 +1386,7 @@ static void *gnw_h7b0_jpeg_worker_thread(void *opaque)
         uint32_t job_epoch = s->job_input_epoch;
         s->job_input = NULL;
         s->job_pending = false;
+        s->worker_active = true;
         qemu_mutex_unlock(&s->thread_lock);
 
         GnwJpegDecodeOut o;
@@ -1396,6 +1398,9 @@ static void *gnw_h7b0_jpeg_worker_thread(void *opaque)
         g_byte_array_free(job, TRUE);
 
         qemu_mutex_lock(&s->thread_lock);
+        g_free(s->pending_y);
+        g_free(s->pending_cb);
+        g_free(s->pending_cr);
         s->pending_y = y;
         s->pending_cb = cb;
         s->pending_cr = cr;
@@ -1407,7 +1412,8 @@ static void *gnw_h7b0_jpeg_worker_thread(void *opaque)
         s->pending_confrn1 = confrn1;
         s->pending_epoch = job_epoch;
         qatomic_store_release(&s->decode_done, true);
-        qemu_cond_signal(&s->done_cond);
+        s->worker_active = false;
+        qemu_cond_broadcast(&s->done_cond);
     }
     qemu_mutex_unlock(&s->thread_lock);
     return NULL;
@@ -1522,6 +1528,24 @@ static void gnw_h7b0_jpeg_poll_worker(GnwH7B0JpegState *s)
     }
 
     qemu_mutex_unlock(&s->thread_lock);
+}
+
+/* BQL held; the worker never acquires BQL. Flags cleared by START/reset
+ * do not describe whether a host decode is still computing. */
+void gnw_h7b0_jpeg_snapshot_quiesce(GnwH7B0JpegState *s, bool discard)
+{
+    if (!s->lock_inited) {
+        return;
+    }
+    qemu_mutex_lock(&s->thread_lock);
+    if (discard) {
+        s->job_epoch++;
+    }
+    while (s->job_pending || s->worker_active) {
+        qemu_cond_wait(&s->done_cond, &s->thread_lock);
+    }
+    qemu_mutex_unlock(&s->thread_lock);
+    gnw_h7b0_jpeg_poll_worker(s);
 }
 
 static void gnw_h7b0_jpeg_reset(DeviceState *dev)
@@ -1842,6 +1866,7 @@ static void gnw_h7b0_jpeg_write(void *opaque, hwaddr addr, uint64_t val64, unsig
      * not accepting more input either" -- closes that off the same way.
      */
     if (addr == GNW_H7B0_JPEG_CONFR0_OFFSET && (val64 & JPEG_CONFR0_START)) {
+        gnw_h7b0_jpeg_snapshot_quiesce(s, true);
         if (s->inbuf) {
             g_byte_array_set_size(s->inbuf, 0);
         }
@@ -2202,14 +2227,157 @@ static void gnw_h7b0_jpeg_finalize(Object *obj)
     g_free(s->pending_y);
     g_free(s->pending_cb);
     g_free(s->pending_cr);
+    g_free(s->y_plane);
+    g_free(s->cb_plane);
+    g_free(s->cr_plane);
+    g_byte_array_unref(s->inbuf);
+    g_byte_array_unref(s->encode_out);
 }
+
+/* All lengths are checked together before allocation, including product
+ * overflow and cursor rounding for a last partially filled DOR word. */
+#define JPEG_STATE_MAX_BYTES (64U * 1024 * 1024)
+
+static bool jpeg_state_sizes(uint32_t w, uint32_t h, uint32_t cw, uint32_t ch,
+                             uint32_t cursor, uint32_t enc_cursor,
+                             const uint32_t lengths[5])
+{
+    uint64_t y = (uint64_t)w * h, c = (uint64_t)cw * ch;
+    uint64_t total = 0;
+
+    if (w > 65535 || h > 65535 || cw > w || ch > h ||
+        (!!w != !!h) || (!!cw != !!ch) ||
+        lengths[2] != y || lengths[3] != c || lengths[4] != c ||
+        cursor > y + 2 * c + 3 || enc_cursor > (uint64_t)lengths[1] + 3) {
+        return false;
+    }
+    for (int i = 0; i < 5; i++) {
+        total += lengths[i];
+    }
+    return total <= JPEG_STATE_MAX_BYTES;
+}
+
+static int jpeg_pre_save(void *opaque)
+{
+    GnwH7B0JpegState *s = opaque;
+    uint32_t lengths[5];
+
+    gnw_h7b0_jpeg_snapshot_quiesce(s, false);
+    lengths[0] = s->inbuf->len;
+    lengths[1] = s->encode_out->len;
+    lengths[2] = (uint64_t)s->plane_width * s->plane_height;
+    lengths[3] = lengths[4] = (uint64_t)s->chroma_width * s->chroma_height;
+    if (!jpeg_state_sizes(s->plane_width, s->plane_height,
+                          s->chroma_width, s->chroma_height,
+                          s->dor_cursor, s->enc_dor_cursor, lengths) ||
+        (lengths[2] && !s->y_plane) ||
+        (lengths[3] && (!s->cb_plane || !s->cr_plane))) {
+        return -EINVAL;
+    }
+    return 0;
+}
+
+static int jpeg_pre_load(void *opaque)
+{
+    gnw_h7b0_jpeg_snapshot_quiesce(opaque, true);
+    return 0;
+}
+
+static int jpeg_put_runtime(QEMUFile *f, void *pv, size_t size,
+                             const VMStateField *field, JSONWriter *vmdesc)
+{
+    GnwH7B0JpegState *s = pv;
+    uint32_t lengths[5] = {s->inbuf->len, s->encode_out->len,
+        s->plane_width * s->plane_height,
+        s->chroma_width * s->chroma_height,
+        s->chroma_width * s->chroma_height};
+    const uint8_t *buffers[5] = {s->inbuf->data, s->encode_out->data,
+                                s->y_plane, s->cb_plane, s->cr_plane};
+
+    qemu_put_be32(f, s->plane_width);
+    qemu_put_be32(f, s->plane_height);
+    qemu_put_be32(f, s->chroma_width);
+    qemu_put_be32(f, s->chroma_height);
+    qemu_put_be32(f, s->dor_cursor);
+    qemu_put_be32(f, s->enc_dor_cursor);
+    for (int i = 0; i < 5; i++) {
+        qemu_put_be32(f, lengths[i]);
+    }
+    for (int i = 0; i < 5; i++) {
+        if (lengths[i]) {
+            qemu_put_buffer(f, buffers[i], lengths[i]);
+        }
+    }
+    return qemu_file_get_error(f);
+}
+
+static int jpeg_get_runtime(QEMUFile *f, void *pv, size_t size,
+                             const VMStateField *field)
+{
+    GnwH7B0JpegState *s = pv;
+    uint32_t w = qemu_get_be32(f), h = qemu_get_be32(f);
+    uint32_t cw = qemu_get_be32(f), ch = qemu_get_be32(f);
+    uint32_t cursor = qemu_get_be32(f), enc_cursor = qemu_get_be32(f);
+    uint32_t lengths[5];
+    uint8_t *planes[3] = {NULL};
+
+    for (int i = 0; i < 5; i++) {
+        lengths[i] = qemu_get_be32(f);
+    }
+    if (qemu_file_get_error(f) ||
+        !jpeg_state_sizes(w, h, cw, ch, cursor, enc_cursor, lengths)) {
+        return -EINVAL;
+    }
+    for (int i = 0; i < 3; i++) {
+        if (lengths[i + 2]) {
+            planes[i] = g_try_malloc(lengths[i + 2]);
+            if (!planes[i]) {
+                for (int j = 0; j < 3; j++) {
+                    g_free(planes[j]);
+                }
+                return -ENOMEM;
+            }
+        }
+    }
+    g_byte_array_set_size(s->inbuf, lengths[0]);
+    g_byte_array_set_size(s->encode_out, lengths[1]);
+    uint8_t *buffers[5] = {s->inbuf->data, s->encode_out->data,
+                           planes[0], planes[1], planes[2]};
+    for (int i = 0; i < 5; i++) {
+        if (lengths[i] && qemu_get_buffer(f, buffers[i], lengths[i]) != lengths[i]) {
+            for (int j = 0; j < 3; j++) {
+                g_free(planes[j]);
+            }
+            return -EIO;
+        }
+    }
+    g_free(s->y_plane);
+    g_free(s->cb_plane);
+    g_free(s->cr_plane);
+    s->y_plane = planes[0]; s->cb_plane = planes[1]; s->cr_plane = planes[2];
+    s->plane_width = w; s->plane_height = h;
+    s->chroma_width = cw; s->chroma_height = ch;
+    s->dor_cursor = cursor; s->enc_dor_cursor = enc_cursor;
+    s->decode_busy = false;
+    return 0;
+}
+
+static const VMStateInfo jpeg_runtime_info = {
+    .name = "jpeg-runtime",
+    .get = jpeg_get_runtime,
+    .put = jpeg_put_runtime,
+};
 
 static const VMStateDescription vmstate_gnw_h7b0_jpeg = {
     .name = TYPE_GNW_H7B0_JPEG,
-    .version_id = 1,
+    .version_id = 2,
     .minimum_version_id = 1,
+    .pre_save = jpeg_pre_save,
+    .pre_load = jpeg_pre_load,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT32_ARRAY(regs, GnwH7B0JpegState, GNW_H7B0_JPEG_SIZE / 4),
+        { .name = "runtime", .version_id = 2, .size = sizeof(GnwH7B0JpegState),
+          .info = &jpeg_runtime_info, .flags = VMS_SINGLE },
         VMSTATE_END_OF_LIST()
     }
 };

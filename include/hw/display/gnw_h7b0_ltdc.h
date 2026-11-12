@@ -284,6 +284,9 @@ struct GnwH7B0LtdcState {
      * deadline-grid discipline as gnw_h7b0_dma_schedule_next().
      */
     int64_t vblank_deadline_ns;
+    int64_t snapshot_vblank_remaining_ns;
+    int64_t snapshot_line_remaining_ns;
+    int64_t snapshot_grid_remaining_ns;
     int invalidate;
     bool pf_warned;
 
@@ -625,6 +628,8 @@ struct GnwH7B0LtdcState {
      * the same single QEMU main thread. */
     bool content_dirty;
 };
+
+void gnw_h7b0_ltdc_snapshot_restore(GnwH7B0LtdcState *s);
 
 void gnw_h7b0_ltdc_set_rcc(GnwH7B0LtdcState *s, GnwH7B0RccState *rcc);
 

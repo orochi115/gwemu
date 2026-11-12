@@ -27,6 +27,7 @@
 #include "qemu/log.h"
 #include "qapi/error.h"
 #include "migration/vmstate.h"
+#include "migration/qemu-file.h"
 #include "exec/cpu-common.h"
 #include "ui/console.h"
 #include "ui/pixel_ops.h"
@@ -2516,12 +2517,239 @@ static void gnw_h7b0_ltdc_unrealize(DeviceState *dev)
                                   &s->fb_l2_track_len, 0, 0);
 }
 
+/* Settle host-only work without a virtual tick, reload, IRQ or new RAM
+ * capture. A staged job owns the pixels read at the original reload instant. */
+static int ltdc_pre_save(void *opaque)
+{
+    GnwH7B0LtdcState *s = opaque;
+    int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+
+    gnw_h7b0_ltdc_wait_compositor_idle(s);
+    gnw_h7b0_ltdc_promote_staged(s);
+    gnw_h7b0_ltdc_wait_compositor_idle(s);
+    s->snapshot_vblank_remaining_ns = timer_pending(s->vblank_timer) ?
+        MAX(timer_expire_time_ns(s->vblank_timer) - now, 0) : -1;
+    s->snapshot_line_remaining_ns = timer_pending(s->line_timer) ?
+        MAX(timer_expire_time_ns(s->line_timer) - now, 0) : -1;
+    s->snapshot_grid_remaining_ns = s->vblank_deadline_ns - now;
+    if (!s->shadow_buffer) {
+        DisplaySurface *surface = qemu_console_surface(s->con);
+        if (!surface || surface_bits_per_pixel(surface) != 32 ||
+            (uint64_t)surface_width(surface) * surface_height(surface) >
+                16U * 1024 * 1024) {
+            return -EINVAL;
+        }
+    }
+    return 0;
+}
+
+static int ltdc_pre_load(void *opaque)
+{
+    GnwH7B0LtdcState *s = opaque;
+
+    gnw_h7b0_ltdc_wait_compositor_idle(s);
+    s->staged_valid = false;
+    return 0;
+}
+
+static int ltdc_put_frame(QEMUFile *f, void *pv, size_t size,
+                           const VMStateField *field, JSONWriter *vmdesc)
+{
+    GnwH7B0LtdcState *s = pv;
+
+    qemu_put_be32(f, s->shadow_width);
+    qemu_put_be32(f, s->shadow_height);
+    for (size_t i = 0; i < (size_t)s->shadow_width * s->shadow_height; i++) {
+        qemu_put_be32(f, s->shadow_buffer[i]);
+    }
+    /* With no captured framebuffer, the console may show its placeholder
+     * or retain the last scanout after a cold reset. Preserve that paused
+     * output too; re-reading guest RAM cannot reconstruct it. */
+    DisplaySurface *surface = qemu_console_surface(s->con);
+    uint32_t w = s->shadow_buffer ? 0 : surface_width(surface);
+    uint32_t h = s->shadow_buffer ? 0 : surface_height(surface);
+
+    qemu_put_be32(f, w);
+    qemu_put_be32(f, h);
+    for (uint32_t y = 0; y < h; y++) {
+        uint32_t *row = (uint32_t *)(surface_data(surface) +
+                                    (size_t)y * surface_stride(surface));
+        for (uint32_t x = 0; x < w; x++) {
+            qemu_put_be32(f, row[x]);
+        }
+    }
+    return qemu_file_get_error(f);
+}
+
+static int ltdc_get_frame(QEMUFile *f, void *pv, size_t size,
+                           const VMStateField *field)
+{
+    GnwH7B0LtdcState *s = pv;
+    uint32_t w = qemu_get_be32(f), h = qemu_get_be32(f);
+    uint32_t *front = NULL, *back = NULL;
+    size_t pixels;
+
+    /* Register-limited geometry, <=64MiB per buffer; reject before allocating. */
+    if (qemu_file_get_error(f) || w > 8191 || h > 2047 || (!!w != !!h)) {
+        return -EINVAL;
+    }
+    pixels = (size_t)w * h;
+    if (pixels) {
+        front = g_try_new(uint32_t, pixels);
+        back = g_try_new0(uint32_t, pixels);
+        if (!front || !back) {
+            g_free(front);
+            g_free(back);
+            return -ENOMEM;
+        }
+        for (size_t i = 0; i < pixels; i++) {
+            front[i] = qemu_get_be32(f);
+        }
+        if (qemu_file_get_error(f)) {
+            g_free(front);
+            g_free(back);
+            return -EIO;
+        }
+    }
+    uint32_t surface_w = qemu_get_be32(f), surface_h = qemu_get_be32(f);
+    if (qemu_file_get_error(f) || surface_w > 16384 || surface_h > 16384 ||
+        (!!surface_w != !!surface_h) || (pixels && surface_w) ||
+        (!pixels && !surface_w) ||
+        (uint64_t)surface_w * surface_h > 16U * 1024 * 1024) {
+        g_free(front);
+        g_free(back);
+        return -EINVAL;
+    }
+    if (surface_w) {
+        DisplaySurface *surface = qemu_create_displaysurface(surface_w, surface_h);
+        for (uint32_t y = 0; y < surface_h; y++) {
+            uint32_t *row = (uint32_t *)(surface_data(surface) +
+                                        (size_t)y * surface_stride(surface));
+            for (uint32_t x = 0; x < surface_w; x++) {
+                row[x] = qemu_get_be32(f);
+            }
+        }
+        if (qemu_file_get_error(f)) {
+            qemu_free_displaysurface(surface);
+            return -EIO;
+        }
+        /* Load executes synchronously under BQL: no UI update can run
+         * between this field and completion of the wrapper restore. */
+        dpy_gfx_replace_surface(s->con, surface);
+    }
+    qemu_mutex_lock(&s->compositor_publish_lock);
+    g_free(s->shadow_buffer);
+    g_free(s->compositor_back_buffer);
+    s->shadow_buffer = front;
+    s->compositor_back_buffer = back;
+    s->shadow_width = w;
+    s->shadow_height = h;
+    qemu_mutex_unlock(&s->compositor_publish_lock);
+    return 0;
+}
+
+static const VMStateInfo ltdc_frame_info = {
+    .name = "ltdc-frame",
+    .get = ltdc_get_frame,
+    .put = ltdc_put_frame,
+};
+
+static int ltdc_post_load(void *opaque, int version_id)
+{
+    GnwH7B0LtdcState *s = opaque;
+    int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+
+    gnw_h7b0_ltdc_fb_track_range(&s->fb_l1_section, &s->fb_l1_track_base,
+                                  &s->fb_l1_track_len, 0, 0);
+    gnw_h7b0_ltdc_fb_track_range(&s->fb_l2_section, &s->fb_l2_track_base,
+                                  &s->fb_l2_track_len, 0, 0);
+    s->invalidate = 1;
+    if (version_id == 1) {
+        gnw_h7b0_ltdc_reload_active(s);
+        gnw_h7b0_ltdc_recalc_timers(s, now);
+        return 0;
+    }
+    if (s->snapshot_vblank_remaining_ns < -1 ||
+        s->snapshot_line_remaining_ns < -1 ||
+        s->snapshot_vblank_remaining_ns > INT64_MAX - now ||
+        s->snapshot_line_remaining_ns > INT64_MAX - now ||
+        s->snapshot_grid_remaining_ns > INT64_MAX - now ||
+        s->snapshot_grid_remaining_ns < -now ||
+        s->srcr_idle_ticks < 0 ||
+        s->srcr_idle_ticks > GNW_H7B0_LTDC_SRCR_IDLE_TICKS_MAX ||
+        s->fb_quiesce_ticks < 0 ||
+        s->fb_quiesce_ticks > GNW_H7B0_LTDC_QUIESCE_TICKS_MAX) {
+        return -EINVAL;
+    }
+    timer_del(s->vblank_timer);
+    timer_del(s->line_timer);
+    if (s->snapshot_vblank_remaining_ns >= 0) {
+        timer_mod(s->vblank_timer, now + s->snapshot_vblank_remaining_ns);
+    }
+    if (s->snapshot_line_remaining_ns >= 0) {
+        timer_mod(s->line_timer, now + s->snapshot_line_remaining_ns);
+    }
+    s->vblank_deadline_ns = now + s->snapshot_grid_remaining_ns;
+    return 0;
+}
+
+void gnw_h7b0_ltdc_snapshot_restore(GnwH7B0LtdcState *s)
+{
+    /* Full-load hook: CPU interrupt controller/RAM are already restored. */
+    gnw_h7b0_ltdc_update_irq(s);
+    gnw_h7b0_ltdc_update_display(s);
+}
+
 static const VMStateDescription vmstate_gnw_h7b0_ltdc = {
     .name = TYPE_GNW_H7B0_LTDC,
-    .version_id = 1,
+    .version_id = 2,
     .minimum_version_id = 1,
+    .pre_save = ltdc_pre_save,
+    .pre_load = ltdc_pre_load,
+    .post_load = ltdc_post_load,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT32_ARRAY(regs, GnwH7B0LtdcState, GNW_H7B0_LTDC_SIZE / 4),
+        VMSTATE_UINT32_V(active_l1cr, GnwH7B0LtdcState, 2),
+        VMSTATE_UINT32_V(active_l1cfbar, GnwH7B0LtdcState, 2),
+        VMSTATE_UINT32_V(active_l1cfblr, GnwH7B0LtdcState, 2),
+        VMSTATE_UINT32_V(active_l1cfblnr, GnwH7B0LtdcState, 2),
+        VMSTATE_UINT32_V(active_l1pfcr, GnwH7B0LtdcState, 2),
+        VMSTATE_UINT32_V(active_l2cr, GnwH7B0LtdcState, 2),
+        VMSTATE_UINT32_V(active_l2cfbar, GnwH7B0LtdcState, 2),
+        VMSTATE_UINT32_V(active_l2cfblr, GnwH7B0LtdcState, 2),
+        VMSTATE_UINT32_V(active_l2cfblnr, GnwH7B0LtdcState, 2),
+        VMSTATE_UINT32_V(active_l2pfcr, GnwH7B0LtdcState, 2),
+        VMSTATE_UINT32_V(active_l2cacr, GnwH7B0LtdcState, 2),
+        VMSTATE_UINT32_V(active_l1ckcr, GnwH7B0LtdcState, 2),
+        VMSTATE_UINT32_V(active_l2ckcr, GnwH7B0LtdcState, 2),
+        VMSTATE_UINT32_V(active_l1dccr, GnwH7B0LtdcState, 2),
+        VMSTATE_UINT32_V(active_l2dccr, GnwH7B0LtdcState, 2),
+        VMSTATE_UINT32_V(active_bccr, GnwH7B0LtdcState, 2),
+        VMSTATE_UINT32_V(active_l1cacr, GnwH7B0LtdcState, 2),
+        VMSTATE_UINT32_V(active_l1bfcr, GnwH7B0LtdcState, 2),
+        VMSTATE_UINT32_V(active_l2bfcr, GnwH7B0LtdcState, 2),
+        VMSTATE_UINT32_V(active_l1whpcr, GnwH7B0LtdcState, 2),
+        VMSTATE_UINT32_V(active_l1wvpcr, GnwH7B0LtdcState, 2),
+        VMSTATE_UINT32_V(active_l2whpcr, GnwH7B0LtdcState, 2),
+        VMSTATE_UINT32_V(active_l2wvpcr, GnwH7B0LtdcState, 2),
+        VMSTATE_UINT32_V(active_gcr, GnwH7B0LtdcState, 2),
+        VMSTATE_UINT32_V(active_bpcr, GnwH7B0LtdcState, 2),
+        VMSTATE_UINT32_ARRAY_V(clut, GnwH7B0LtdcState, 256, 2),
+        VMSTATE_UINT32_ARRAY_V(clut2, GnwH7B0LtdcState, 256, 2),
+        VMSTATE_BOOL_V(vbr_reload_pending, GnwH7B0LtdcState, 2),
+        VMSTATE_BOOL_V(vbr_deferred_capture, GnwH7B0LtdcState, 2),
+        VMSTATE_BOOL_V(vbr_active, GnwH7B0LtdcState, 2),
+        VMSTATE_BOOL_V(content_dirty, GnwH7B0LtdcState, 2),
+        VMSTATE_BOOL_V(fb_reg_dirty, GnwH7B0LtdcState, 2),
+        VMSTATE_BOOL_V(fb_quiesce_pending, GnwH7B0LtdcState, 2),
+        VMSTATE_BOOL_V(structural_transition_pending, GnwH7B0LtdcState, 2),
+        VMSTATE_INT32_V(fb_quiesce_ticks, GnwH7B0LtdcState, 2),
+        VMSTATE_INT32_V(srcr_idle_ticks, GnwH7B0LtdcState, 2),
+        VMSTATE_INT64_V(snapshot_vblank_remaining_ns, GnwH7B0LtdcState, 2),
+        VMSTATE_INT64_V(snapshot_line_remaining_ns, GnwH7B0LtdcState, 2),
+        VMSTATE_INT64_V(snapshot_grid_remaining_ns, GnwH7B0LtdcState, 2),
+        { .name = "frame", .version_id = 2, .size = sizeof(GnwH7B0LtdcState),
+          .info = &ltdc_frame_info, .flags = VMS_SINGLE },
         VMSTATE_END_OF_LIST()
     }
 };

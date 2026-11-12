@@ -76,6 +76,7 @@ struct GnwH7B0JpegState {
      * poll can briefly (bounded) sleep instead of busy-returning "not
      * done" -- see gnw_h7b0_jpeg_poll_worker(). */
     QemuCond done_cond;
+    bool worker_active;  /* thread_lock: includes compute outside the lock */
     bool job_pending;    /* BQL thread -> worker: a job is queued */
     bool lock_inited;    /* thread_lock/conds initialized (worker may not be) */
     bool decode_done;    /* worker -> BQL thread: pending_* is ready */
@@ -108,6 +109,8 @@ struct GnwH7B0JpegState {
     uint32_t job_input_epoch; /* epoch the currently-queued job was posted under */
     uint32_t pending_epoch;   /* epoch the finished pending_* result belongs to */
 };
+
+void gnw_h7b0_jpeg_snapshot_quiesce(GnwH7B0JpegState *s, bool discard);
 
 void gnw_h7b0_jpeg_get_last_decoded_size(uint32_t *width, uint32_t *height);
 void gnw_h7b0_jpeg_get_last_chroma_size(uint32_t *width, uint32_t *height);
