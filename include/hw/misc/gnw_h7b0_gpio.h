@@ -113,6 +113,8 @@ struct GnwH7B0GpioState {
     uint64_t handoff_epoch;
     unsigned pending_handoffs;
     bool host_buttons[16];
+    /* Guest virtual input survives host cleanup and is migrated separately. */
+    bool nonhost_buttons[16];
     int64_t pa0_remaining_ns;
     QEMUTimer *pa0_release_timer;
     /*
@@ -134,6 +136,8 @@ struct GnwH7B0GpioState {
 int gnw_h7b0_gpio_button_from_name(const char *name);
 void gnw_h7b0_gpio_inject_button(GnwH7B0GpioState *s, int button,
                                  bool pressed);
+/* Release only keyboard/QMP-held keys; leave timeline/cold-start input alone. */
+unsigned gnw_h7b0_gpio_release_host_input(GnwH7B0GpioState *s);
 void gnw_h7b0_gpio_set_unlock_handoff(GnwH7B0GpioState *s, CPUState *cpu,
                                       uint8_t *itcm, size_t itcm_size,
                                       uint8_t *extflash, size_t extflash_size,

@@ -358,13 +358,43 @@ static void gnw_h7b0_gpio_set_button(GnwH7B0GpioState *s, int button,
     }
 }
 
+static void gnw_h7b0_gpio_update_button_source(GnwH7B0GpioState *s,
+                                              int button, bool pressed,
+                                              bool host)
+{
+    bool *source = host ? s->host_buttons : s->nonhost_buttons;
+    bool before = s->host_buttons[button] || s->nonhost_buttons[button];
+    bool after;
+
+    source[button] = pressed;
+    after = s->host_buttons[button] || s->nonhost_buttons[button];
+    /* POWER handoff consumes an edge without necessarily changing its pin.
+     * Compare source state, not the physical GPIO level. */
+    if (before != after) {
+        gnw_h7b0_gpio_set_button(s, button, after);
+    }
+}
+
 /* Non-static entry point for the timeline engine (gnw_timeline.c). */
 void gnw_h7b0_gpio_inject_button(GnwH7B0GpioState *s, int button,
                                  bool pressed)
 {
     if (button >= 0 && button < GNW_BTN__COUNT) {
-        gnw_h7b0_gpio_set_button(s, button, pressed);
+        gnw_h7b0_gpio_update_button_source(s, button, pressed, false);
     }
+}
+
+unsigned gnw_h7b0_gpio_release_host_input(GnwH7B0GpioState *s)
+{
+    unsigned released = 0;
+
+    for (int i = 0; i < GNW_BTN__COUNT; i++) {
+        if (s->host_buttons[i]) {
+            gnw_h7b0_gpio_update_button_source(s, i, false, true);
+            released++;
+        }
+    }
+    return released;
 }
 
 void gnw_h7b0_gpio_set_unlock_handoff(GnwH7B0GpioState *s, CPUState *cpu,
@@ -459,8 +489,7 @@ static void gnw_h7b0_gpio_input_event(DeviceState *dev, QemuConsole *src,
                     /* Ignore key repeat */
                     break;
                 }
-                s->host_buttons[i] = key->down;
-                gnw_h7b0_gpio_set_button(s, i, key->down);
+                gnw_h7b0_gpio_update_button_source(s, i, key->down, true);
                 if (rec_file) {
                     double t = (double)qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) / 1000000000.0;
                     gnw_timeline_record_line(
@@ -490,6 +519,7 @@ static void gnw_h7b0_gpio_reset(DeviceState *dev)
 
     s->handoff_epoch++;
     memset(s->host_buttons, 0, sizeof(s->host_buttons));
+    memset(s->nonhost_buttons, 0, sizeof(s->nonhost_buttons));
 
     gnw_h7b0_softspi_reset(&s->softspi);
 
@@ -707,6 +737,9 @@ static void gnw_h7b0_gpio_pa0_release(void *opaque)
 {
     GnwH7B0GpioState *s = GNW_H7B0_GPIO(opaque);
 
+    if (s->host_buttons[GNW_BTN_PWR] || s->nonhost_buttons[GNW_BTN_PWR]) {
+        return;
+    }
     s->regs[(0 * GNW_H7B0_GPIO_PORT_SIZE + GNW_H7B0_GPIO_IDR_OFFSET) >> 2] |= (1u << 0);
     if (s->exti) {
         gnw_h7b0_exti_set_line(s->exti, 0, true);
@@ -754,8 +787,8 @@ static void gnw_h7b0_gpio_auto_cb(void *opaque)
     while (auto_next < auto_nevents && auto_events[auto_next].ns <= now) {
         fprintf(stderr, "AUTOBTN %d %d %" PRId64 "\n",
                 auto_events[auto_next].btn, auto_events[auto_next].down, now);
-        gnw_h7b0_gpio_set_button(s, auto_events[auto_next].btn,
-                                  auto_events[auto_next].down);
+        gnw_h7b0_gpio_inject_button(s, auto_events[auto_next].btn,
+                                     auto_events[auto_next].down);
         auto_next++;
     }
     if (auto_next < auto_nevents) {
@@ -860,6 +893,10 @@ static int gpio_post_load(void *opaque, int version_id)
     GnwH7B0GpioState *s = opaque;
 
     memset(s->host_buttons, 0, sizeof(s->host_buttons));
+    if (version_id < 4) {
+        /* An old stream must not inherit the destination's held sources. */
+        memset(s->nonhost_buttons, 0, sizeof(s->nonhost_buttons));
+    }
     if (version_id >= 3) {
         if (s->pa0_remaining_ns < -1) {
             return -EINVAL;
@@ -875,7 +912,7 @@ static int gpio_post_load(void *opaque, int version_id)
 
 static const VMStateDescription vmstate_gnw_h7b0_gpio = {
     .name = TYPE_GNW_H7B0_GPIO,
-    .version_id = 3,
+    .version_id = 4,
     .minimum_version_id = 1,
     .pre_save = gpio_pre_save,
     .post_load = gpio_post_load,
@@ -888,6 +925,7 @@ static const VMStateDescription vmstate_gnw_h7b0_gpio = {
         VMSTATE_BOOL_V(charging, GnwH7B0GpioState, 3),
         VMSTATE_BOOL_V(unlock_handoff_active, GnwH7B0GpioState, 3),
         VMSTATE_INT64_V(pa0_remaining_ns, GnwH7B0GpioState, 3),
+        VMSTATE_BOOL_ARRAY_V(nonhost_buttons, GnwH7B0GpioState, 16, 4),
         VMSTATE_END_OF_LIST()
     }
 };

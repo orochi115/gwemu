@@ -680,6 +680,20 @@ SRST
 ERST
 
     {
+        .name       = "gnw-release-host-input",
+        .args_type  = "",
+        .params     = "",
+        .help       = "release host-held Game & Watch keys without running the guest",
+        .cmd        = NULL,
+    },
+
+SRST
+``gnw-release-host-input``
+  Release keys held by host input, including while paused or unpowered.
+  Leave non-host inputs, CPU execution and guest memory unchanged.
+ERST
+
+    {
         .name       = "system_powerdown",
         .args_type  = "",
         .params     = "",

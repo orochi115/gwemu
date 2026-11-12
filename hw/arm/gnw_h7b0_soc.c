@@ -162,6 +162,19 @@ static void hmp_gnw_ui_reset(Monitor *mon, const QDict *qdict)
     monitor_printf(mon, "GNW UI reset requested\n");
 }
 
+static void hmp_gnw_release_host_input(Monitor *mon, const QDict *qdict)
+{
+    Object *obj = object_resolve_path_type("/machine/soc", TYPE_GNW_H7B0_SOC,
+                                          NULL);
+
+    if (!obj) {
+        monitor_printf(mon, "GNW host input release requires gnw-h7b0\n");
+        return;
+    }
+    monitor_printf(mon, "GNW host input released: %u\n",
+                   gnw_h7b0_gpio_release_host_input(&GNW_H7B0_SOC(obj)->gpio));
+}
+
 static void gnw_h7b0_soc_prepare_cold_reset(GnwH7B0State *s)
 {
     uint8_t *itcm = memory_region_get_ram_ptr(&s->itcm);
@@ -1635,6 +1648,8 @@ static void gnw_h7b0_soc_realize(DeviceState *dev_soc, Error **errp)
     s->initial_boot_handoff_pending = s->rdp_locked;
     monitor_register_hmp("gnw-cold-cycle", false, hmp_gnw_cold_cycle);
     monitor_register_hmp("gnw-ui-reset", false, hmp_gnw_ui_reset);
+    monitor_register_hmp("gnw-release-host-input", false,
+                         hmp_gnw_release_host_input);
 
     /*
      * Remaining peripherals (DMA2D, GPIO, USART, real flash/QSPI boot)
