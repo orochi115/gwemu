@@ -59,6 +59,7 @@
 #include "hw/core/sysbus.h"
 #include "qemu/timer.h"
 #include "qom/object.h"
+#include "hw/misc/gnw_h7b0_softspi.h"
 
 #define TYPE_GNW_H7B0_GPIO "gnw-h7b0-gpio"
 OBJECT_DECLARE_SIMPLE_TYPE(GnwH7B0GpioState, GNW_H7B0_GPIO)
@@ -87,6 +88,7 @@ struct GnwH7B0GpioState {
     bool power_input;
     bool usb_power;
     bool charging;
+    GnwH7B0SoftSpi softspi;
     /* Set by the SoC after both devices exist (see gnw_h7b0_soc.c). Used
      * only to notify EXTI of the PA0 (WKUP1, best guess) release edge --
      * see gnw_h7b0_gpio_pa0_release() in gnw_h7b0_gpio.c. */

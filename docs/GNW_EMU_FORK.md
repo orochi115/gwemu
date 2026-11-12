@@ -36,9 +36,9 @@ and child-owned session lock, without copying the legacy STM32 model:
 Parent regressions in `tests/test_gwemu_desktop.py` check real composed pixels,
 partial ACKs, invalid endpoints, UID bytes, locking, and nonzero/zero WAV PCM
 across mute and voice recreation. The preview is explicitly selected in the
-parent desktop and uses independent working images. Power controls, complete
-instant states, supply-domain cold boot/software SPI, and full firmware/audio acceptance are
-still pending. Track them in the parent migration plan.
+parent desktop and uses independent working images. Complete instant states,
+supply-domain cold boot, and full firmware/audio acceptance are still pending.
+Track them in the parent migration plan.
 
 The next preview batch adds an explicit board-input approximation:
 `-M gnw-h7b0,power-model=on,battery=50,usb-power=off,battery-life-min=480,charge-time-min=180`.
@@ -58,3 +58,44 @@ on its SRAM/internal-Flash/UID/POWER-timing evidence. Desktop normal shutdown
 freezes guest time, reads the power state, and saves it only after successful
 exit and file synchronization; readback failure still terminates the child
 and reports uncertain saving.
+
+Software SPI SD is selected explicitly with startup-only machine property
+`-M gnw-h7b0,sd-wiring=ospi`; `spi1` is the default and preserves the existing
+dedicated SPI1 polled/DMA behavior. The `ospi` name follows the parent profile:
+this is GPIO bit-banging on shared Flash pins, not an SD device attached to
+the hardware OCTOSPI peripheral. PB2 is CLK, PB1 MOSI, PD12 MISO, and PE11
+high selects SD (low selects NOR Flash). CLK/MOSI/select must be configured
+as GPIO outputs; AF traffic is ignored. PD12 is driven only in digital-input
+mode, retaining output loopback and other pin readbacks.
+
+A small mode-0 bridge owns the existing SPI1 SSI bus in this mode; SPI1
+TXDR/DMA return `0xff` without consuming card bytes. The same upstream
+`ssi-sd`/`sd-card` devices and `-drive if=sd,format=raw,file=...` backend handle
+the protocol and persistent image. No legacy STM32/SD parser is copied.
+Since SSI exchanges complete bytes, a MOSI byte is submitted at its eighth
+rising edge and its reply is shifted during the next byte. Current MISO
+remains stable until the falling edge, including the eighth bit. This adds
+one byte of response latency, tolerated by the firmware's response polling.
+
+Byte-aligned PE11 deselect/reselect preserves the pending response and
+upstream command/data state: Retro-Go toggles select between individual
+response reads. Incomplete outgoing bytes are abandoned on deselection or
+loss of output mode; a partially consumed response is discarded. This does
+not promise arbitrary mid-command recovery or real card power cycling;
+upstream `ssi-sd` has no CS-abort callback. System reset clears the bridge's
+shift state and resets the upstream card devices without erasing the image.
+The bridge state is included in GPIO VMState; this alone does not provide
+the parent's complete Flash rollback required for desktop instant states.
+
+Parent `tests/test_gwemu_softspi.py` covers default/explicit SPI1 and software
+SPI initialization, patterned sector reads/writes/reopen, per-byte select
+gaps, absent card, partial-byte cancellation, reset, AF/mode changes,
+duplicate clock writes, eighth-bit stability, and startup validation.
+
+The software driver's CMD18/CMD12 multi-sector sequence also exposed a
+small upstream SSI SD bug: CMD12 can interrupt a partly clocked next block,
+but the adapter retained its byte count and CRC. A subsequent CMD17 then
+returned fewer than 512 data bytes, substituting CRC bytes at the end.
+The adapter now clears that interrupted read count/CRC when accepting
+CMD12. Regression tests cover both hardware and software SPI, three
+patterned sectors, stop/read-again, and CMD9/CMD10 data CRCs.

@@ -630,6 +630,7 @@ struct GnwH7B0State {
      */
     /* Optional 96-bit UID in raw memory byte order (24 hex digits). */
     char *device_uid;
+    char *sd_wiring;
     char *bank1_image;
     char *bank2_image;
     char *extflash_image;

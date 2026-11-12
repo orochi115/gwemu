@@ -649,6 +649,11 @@ static void gnw_h7b0_soc_realize(DeviceState *dev_soc, Error **errp)
         return;
     }
     uint8_t uid_bytes[12];
+    if (s->sd_wiring && strcmp(s->sd_wiring, "spi1") &&
+        strcmp(s->sd_wiring, "ospi")) {
+        error_setg(errp, "sd-wiring must be spi1 or ospi");
+        return;
+    }
     if (s->device_uid) {
         if (strlen(s->device_uid) != sizeof(uid_bytes) * 2) {
             error_setg(errp, "UID must contain exactly 24 hexadecimal digits");
@@ -1189,6 +1194,10 @@ static void gnw_h7b0_soc_realize(DeviceState *dev_soc, Error **errp)
         return;
     }
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->spi1), 0, SPI1_BASE_ADDRESS);
+    if (s->sd_wiring && !strcmp(s->sd_wiring, "ospi")) {
+        s->spi1.softspi = true;
+        s->gpio.softspi.bus = s->spi1.ssi;
+    }
     sysbus_connect_irq(SYS_BUS_DEVICE(&s->spi1), 0,
                         qdev_get_gpio_in(armv7m, SPI1_IRQn));
 
@@ -1564,6 +1573,7 @@ static const Property gnw_h7b0_soc_properties[] = {
      * extflash_image fields in gnw_h7b0_soc.h.
      */
     DEFINE_PROP_STRING("uid", GnwH7B0State, device_uid),
+    DEFINE_PROP_STRING("sd-wiring", GnwH7B0State, sd_wiring),
     DEFINE_PROP_STRING("bank1-image", GnwH7B0State, bank1_image),
     DEFINE_PROP_STRING("bank2-image", GnwH7B0State, bank2_image),
     DEFINE_PROP_STRING("extflash-image", GnwH7B0State, extflash_image),

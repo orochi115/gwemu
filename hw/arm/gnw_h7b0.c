@@ -75,6 +75,7 @@ struct GnwH7B0MachineState {
     MachineState parent_obj;
     char *frame_endpoint;
     char *session_lock;
+    char *sd_wiring;
     int session_lock_fd;
     bool initialized;
     GnwH7B0Power power;
@@ -107,6 +108,7 @@ static void gnw_h7b0_init(MachineState *machine)
     clock_set_hz(sysclk, 64000000ULL);
 
     dev = qdev_new(TYPE_GNW_H7B0_SOC);
+    qdev_prop_set_string(dev, "sd-wiring", s->sd_wiring);
     object_property_add_child(OBJECT(machine), "soc", OBJECT(dev));
     qdev_connect_clock_in(dev, "sysclk", sysclk);
 
@@ -161,6 +163,27 @@ static void gnw_h7b0_set_##field(Object *obj, const char *value, Error **errp) \
 
 DESKTOP_STRING_PROPERTY(frame_endpoint, "frame-endpoint")
 DESKTOP_STRING_PROPERTY(session_lock, "session-lock")
+
+static char *gnw_h7b0_get_sd_wiring(Object *obj, Error **errp)
+{
+    return g_strdup(GNW_H7B0_MACHINE(obj)->sd_wiring);
+}
+
+static void gnw_h7b0_set_sd_wiring(Object *obj, const char *value, Error **errp)
+{
+    GnwH7B0MachineState *s = GNW_H7B0_MACHINE(obj);
+
+    if (s->initialized) {
+        error_setg(errp, "sd-wiring can only be set before machine initialization");
+        return;
+    }
+    if (strcmp(value, "spi1") && strcmp(value, "ospi")) {
+        error_setg(errp, "sd-wiring must be spi1 or ospi");
+        return;
+    }
+    g_free(s->sd_wiring);
+    s->sd_wiring = g_strdup(value);
+}
 
 static bool gnw_h7b0_get_power_model(Object *obj, Error **errp)
 {
@@ -246,6 +269,8 @@ static void gnw_h7b0_machine_class_init(ObjectClass *oc, const void *data)
                                  gnw_h7b0_set_frame_endpoint);
     object_class_property_add_str(oc, "session-lock", gnw_h7b0_get_session_lock,
                                  gnw_h7b0_set_session_lock);
+    object_class_property_add_str(oc, "sd-wiring", gnw_h7b0_get_sd_wiring,
+                                 gnw_h7b0_set_sd_wiring);
     object_class_property_add_bool(oc, "power-model", gnw_h7b0_get_power_model,
                                   gnw_h7b0_set_power_model);
     object_class_property_add_bool(oc, "usb-power", gnw_h7b0_get_usb,
@@ -263,6 +288,7 @@ static void gnw_h7b0_machine_class_init(ObjectClass *oc, const void *data)
 static void gnw_h7b0_machine_instance_init(Object *obj)
 {
     GNW_H7B0_MACHINE(obj)->session_lock_fd = -1;
+    GNW_H7B0_MACHINE(obj)->sd_wiring = g_strdup("spi1");
     GNW_H7B0_MACHINE(obj)->power.battery = 100;
     GNW_H7B0_MACHINE(obj)->power.level = 100;
     GNW_H7B0_MACHINE(obj)->power.battery_life_min = 480;
@@ -274,6 +300,7 @@ static void gnw_h7b0_machine_finalize(Object *obj)
     GnwH7B0MachineState *s = GNW_H7B0_MACHINE(obj);
     g_free(s->frame_endpoint);
     g_free(s->session_lock);
+    g_free(s->sd_wiring);
     gnw_h7b0_power_free(&s->power);
     if (s->session_lock_fd >= 0) {
         close(s->session_lock_fd);

@@ -134,6 +134,8 @@ struct GnwH7B0SpiState {
     bool logged_unimp[GNW_H7B0_SPI_SIZE / 4];
 
     bool sd_card;
+    /* Board's GPIO bridge owns this bus instead of SPI1 TXDR/DMA. */
+    bool softspi;
     SSIBus *ssi;
 
     qemu_irq irq;

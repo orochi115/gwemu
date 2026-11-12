@@ -180,7 +180,7 @@ static void gnw_h7b0_spi_dma_rx_notify(void *opaque, bool half,
             memset(txbuf, 0xff, chunk);
         }
         for (uint32_t i = 0; i < chunk; i++) {
-            rxbuf[i] = ssi_transfer(s->ssi, txbuf[i]) & 0xff;
+            rxbuf[i] = s->softspi ? 0xff : ssi_transfer(s->ssi, txbuf[i]) & 0xff;
         }
         cpu_physical_memory_write(m0ar + off, rxbuf, chunk);
 
@@ -401,7 +401,7 @@ static void gnw_h7b0_spi_write(void *opaque, hwaddr addr,
         s->regs[addr >> 2] = value;
         if (s->ssi) {
             /* Real SSI byte exchange with the attached virtual SD card. */
-            uint32_t rx = ssi_transfer(s->ssi, value & 0xff);
+            uint32_t rx = s->softspi ? 0xff : ssi_transfer(s->ssi, value & 0xff);
             s->regs[GNW_H7B0_SPI_RXDR >> 2] = rx;
             /*
              * RXP must be set whenever a real byte lands in RXDR --

@@ -467,6 +467,8 @@ static void gnw_h7b0_gpio_reset(DeviceState *dev)
 {
     GnwH7B0GpioState *s = GNW_H7B0_GPIO(dev);
 
+    gnw_h7b0_softspi_reset(&s->softspi);
+
     for (int i = 0; i < (GNW_H7B0_GPIO_SIZE / 4); i++) {
         uint32_t port_offset = (i * 4) % GNW_H7B0_GPIO_PORT_SIZE;
         s->regs[i] = get_gpio_reset_value(port_offset);
@@ -551,6 +553,13 @@ static uint64_t gnw_h7b0_gpio_read(void *opaque, hwaddr addr,
         return 0;
     }
     value = s->regs[reg >> 2];
+
+    if (s->softspi.bus &&
+        reg == 3 * GNW_H7B0_GPIO_PORT_SIZE + GNW_H7B0_GPIO_IDR_OFFSET &&
+        ((s->regs[(3 * GNW_H7B0_GPIO_PORT_SIZE +
+                    GNW_H7B0_GPIO_MODER_OFFSET) >> 2] >> 24) & 3) == 0) {
+        value = deposit32(value, 12, 1, s->softspi.miso);
+    }
 
     /* PC8 senses the shared board revision. With its digital input enabled,
      * the PC5-TIME board presents a low level. Keep the existing reset/analog
@@ -645,6 +654,9 @@ static void gnw_h7b0_gpio_write(void *opaque, hwaddr addr,
         port_offset == GNW_H7B0_GPIO_BSRR_OFFSET) {
         int port = (int)(reg / GNW_H7B0_GPIO_PORT_SIZE);
         gnw_h7b0_gpio_sync_output_idr(s, port);
+        if (port == 1 || port == 4) {
+            gnw_h7b0_softspi_update(&s->softspi, s->regs);
+        }
     }
 }
 
@@ -811,10 +823,12 @@ static void gnw_h7b0_gpio_realize(DeviceState *dev, Error **errp)
 
 static const VMStateDescription vmstate_gnw_h7b0_gpio = {
     .name = TYPE_GNW_H7B0_GPIO,
-    .version_id = 1,
+    .version_id = 2,
     .minimum_version_id = 1,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT32_ARRAY(regs, GnwH7B0GpioState, GNW_H7B0_GPIO_SIZE / 4),
+        VMSTATE_STRUCT(softspi, GnwH7B0GpioState, 2,
+                         vmstate_gnw_h7b0_softspi, GnwH7B0SoftSpi),
         VMSTATE_END_OF_LIST()
     }
 };
