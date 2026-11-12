@@ -158,13 +158,6 @@ void gnw_h7b0_soc_cold_power_cycle(void)
     s = GNW_H7B0_SOC(obj);
     itcm = memory_region_get_ram_ptr(&s->itcm);
 
-    /* The immutable boot path supplies this original ITCM image after power
-     * is restored. Preserve the real loader-provided bytes once so later
-     * cold cycles do not reuse the decoded unlock payload. */
-    if (!s->cold_itcm_seed) {
-        s->cold_itcm_seed = g_memdup2(itcm, memory_region_size(&s->itcm));
-    }
-
     /* Full power removal clears volatile SRAM banks. Internal/external flash,
      * option bytes, and the factory UID are nonvolatile and retained. */
 #define CLEAR_VOLATILE_RAM(field) \
@@ -179,6 +172,7 @@ void gnw_h7b0_soc_cold_power_cycle(void)
     CLEAR_VOLATILE_RAM(bkpsram);
 #undef CLEAR_VOLATILE_RAM
     memcpy(itcm, s->cold_itcm_seed, memory_region_size(&s->itcm));
+    gnw_h7b0_tamp_backup_domain_reset(&s->tamp);
 
     /* Reset the CPU and all peripheral registers, then reapply power and
      * synthesize the user's POWER press after 750 ms of guest time. */
@@ -194,6 +188,15 @@ static void gnw_h7b0_soc_reset_exit(Object *obj, ResetType type)
     CPUARMState *env;
 
     (void)type;
+
+    /* Every legacy loader/ROM reset hold has completed before reset exit.
+     * Capture only the initial boot image, before the guest can decode an
+     * unlock payload or use ITCM as working RAM. Capturing at the first
+     * cold-cycle request would retain those later volatile guest bytes. */
+    if (!s->cold_itcm_seed) {
+        s->cold_itcm_seed = g_memdup2(memory_region_get_ram_ptr(&s->itcm),
+                                    memory_region_size(&s->itcm));
+    }
 
     if (s->initial_boot_handoff_pending) {
         s->initial_boot_handoff_pending = false;

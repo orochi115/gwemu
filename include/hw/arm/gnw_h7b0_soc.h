@@ -595,7 +595,8 @@ struct GnwH7B0State {
     MemoryRegion uid;
 
     /* A cold power cycle clears volatile silicon state without destroying
-     * the emulator process. The captured ITCM boot seed models the bytes
+     * the emulator process. The ITCM seed is captured at initial reset exit,
+     * after loader writes and before guest execution; it models the bytes
      * supplied by the device's immutable boot path after power returns. */
     uint8_t *cold_itcm_seed;
     QEMUTimer *startup_handoff_timer;

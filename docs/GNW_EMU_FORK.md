@@ -99,3 +99,24 @@ returned fewer than 512 data bytes, substituting CRC bytes at the end.
 The adapter now clears that interrupted read count/CRC when accepting
 CMD12. Regression tests cover both hardware and software SPI, three
 patterned sectors, stop/read-again, and CMD9/CMD10 data CRCs.
+
+The existing native `gnw-cold-cycle` HMP command now captures its immutable
+ITCM seed at the initial system reset's exit phase, after loader/ROM reset
+holds and before guest execution. Capturing on the first cold-cycle request
+instead retained guest working data or a decoded unlock payload as boot
+state. Full removal also clears all TAMP backup registers using the existing
+backup-domain reset hook; normal system reset continues to preserve them.
+Internal/external Flash, option bytes and UID remain nonvolatile.
+
+Parent power regressions cover loaded ITCM bytes, cleared unloaded ITCM,
+warm/cold backup-register distinctions and repeated POWER pulses. Optional
+copied-ROM acceptance is in `tests/test_gwemu_cold_firmware.py`. After backup
+state loss, patched Zelda OFW requires completing its PRESS TIME screen
+before the Left+GAME patch can enter Retro-Go again.
+
+This remains an explicit in-process reset approximation with a delayed
+POWER press. It does not provide a battery-connected property, sustained
+off-state CPU gating, physical RTC/VBAT behavior or protection-transition
+acceptance. Existing direct SRAM memset/ITCM memcpy translation-cache
+behavior remains a separate unproven concern; this narrow patch does not
+change it or claim complete cold-start/savestate fidelity.
