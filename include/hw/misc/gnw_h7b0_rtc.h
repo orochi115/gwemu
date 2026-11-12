@@ -46,6 +46,12 @@
  * too, which silently freezes tv_usec for every
  * GW_GetCurrentMillis()/_gettimeofday() caller.
  *
+ * Opt-in use-rtc-clock selects QEMU's -rtc clock for the calendar and timers;
+ * preserve-calendar retains its anchor on warm reset. With use-rtc-clock and
+ * sync-host=false, INIT freezes calendar/alarm A/B and commits TR/DR together
+ * on exit; the independent wakeup counter continues. Backup-domain loss
+ * explicitly reseeds the calendar. Defaults keep the historical behavior.
+ *
  * Every other register (WPR, CALR, SHIFTR, timestamp and CFGR) is a plain
  * read/write shadow with no side effects.
  *
@@ -73,6 +79,7 @@
 
 #include "hw/core/sysbus.h"
 #include "qom/object.h"
+#include "qemu/timer.h"
 
 #define TYPE_GNW_H7B0_RTC "gnw-h7b0-rtc"
 OBJECT_DECLARE_SIMPLE_TYPE(GnwH7B0RtcState, GNW_H7B0_RTC)
@@ -157,8 +164,15 @@ struct GnwH7B0RtcState {
     int64_t shadow_vclock_ns;
 
     bool sync_host;
+    /* Opt-in desktop policy; defaults preserve upstream behavior. */
+    bool use_rtc_clock;
+    bool preserve_calendar;
+    bool calendar_initialized;
+    QEMUClockType clock;
+
 };
 
 void gnw_h7b0_rtc_set_sync_host(bool sync_host);
+void gnw_h7b0_rtc_backup_domain_reset(GnwH7B0RtcState *s);
 
 #endif

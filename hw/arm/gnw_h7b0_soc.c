@@ -74,7 +74,12 @@ static void gnw_h7b0_bus_v6_dma_tc(void *opaque, bool half,
 
 static void gnw_h7b0_soc_tamp_backup_domain_reset(void *opaque)
 {
-    gnw_h7b0_tamp_backup_domain_reset(GNW_H7B0_TAMP(opaque));
+    GnwH7B0State *s = opaque;
+
+    gnw_h7b0_tamp_backup_domain_reset(&s->tamp);
+    if (s->rtc.preserve_calendar) {
+        gnw_h7b0_rtc_backup_domain_reset(&s->rtc);
+    }
 }
 
 static void gnw_h7b0_bus_v6_tim_update(void *opaque, int instance)
@@ -183,6 +188,7 @@ static void gnw_h7b0_soc_prepare_cold_reset(GnwH7B0State *s)
 #undef CLEAR_VOLATILE_RAM
     memcpy(itcm, s->cold_itcm_seed, memory_region_size(&s->itcm));
     gnw_h7b0_tamp_backup_domain_reset(&s->tamp);
+    gnw_h7b0_rtc_backup_domain_reset(&s->rtc);
 }
 
 static void gnw_h7b0_soc_schedule_power(GnwH7B0State *s)
@@ -1566,7 +1572,7 @@ static void gnw_h7b0_soc_realize(DeviceState *dev_soc, Error **errp)
     }
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->tamp), 0, TAMP_BASE_ADDRESS);
     gnw_h7b0_rcc_set_backup_domain_reset(
-        &s->rcc, gnw_h7b0_soc_tamp_backup_domain_reset, &s->tamp);
+        &s->rcc, gnw_h7b0_soc_tamp_backup_domain_reset, s);
 
     if (!sysbus_realize(SYS_BUS_DEVICE(&s->wwdg), errp)) {
         return;

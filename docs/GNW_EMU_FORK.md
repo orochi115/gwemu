@@ -156,3 +156,36 @@ physical protection transitions or sudden-loss SD consistency. QEMU virtual
 time pauses while unpowered. Debugger memory writes remain available as
 debug operations. Full VMState/Flash rollback and desktop battery controls
 are separate work.
+
+The desktop RTC integration opts in with three globals:
+`gnw-h7b0-rtc.use-rtc-clock=on`, `gnw-h7b0-rtc.preserve-calendar=on`,
+`gnw-h7b0-rtc.sync-host=off`. Calendar, SSR, shadow snapshots, alarms A/B
+and wakeup use QEMU's selected `rtc_clock`: host mode ticks while paused;
+`-rtc ...,clock=vm` advances on virtual time. `initial-epoch` still supplies
+an explicit UTC starting calendar; the default seed is host-local time.
+Warm reset preserves the anchor but resets control registers and cancels
+timers. Explicit cold/supply-domain reset invalidates the anchor and
+synchronously cancels host-clock timers. RCC BDRST also clears RTC when
+preserve-calendar is enabled, keeping the default TAMP-only callback intact.
+
+With use-rtc-clock and sync-host disabled, INIT captures/freezes the calendar
+and cancels calendar alarms. Writes to TR/DR are staged and committed once
+on INIT exit, then alarms are rescheduled. The independent wakeup counter
+continues during INIT. Warm reset discards incomplete staged writes. Direct
+TR/DR writes outside INIT retain immediate reanchoring. Host-local writes
+now infer daylight saving time (`tm_isdst=-1`), fixing summer clock setting.
+VMState v6 versions the initialization flag; old anchors remain readable.
+This does not establish whole-board/Flash rollback or cross-policy states.
+
+All new globals default off except the existing sync-host write suppression,
+so upstream's virtual-only/reset-seeded behavior remains the default.
+Parent RTC tests cover boundary/shadow/calendar setting, reset/source
+arbitration and paused host timers. Copied-ROM tests compare both kernels'
+startup calendar and faithful post-boot INIT setting on four image sets.
+Gwemu enters Retro-Go bank2; legacy compares the existing OFW entry on the
+two patched image sets, as in the parent migration baseline.
+Session RTC remains startup configuration: fixed sessions reopen at their
+configured epoch, host sessions reopen at current host time. Physical VBAT,
+oscillator shutdown, 12-hour mode and cycle-accurate protection remain outside
+this compatibility batch; an unpowered host-mode RTC is not a physical
+backup-domain simulation.

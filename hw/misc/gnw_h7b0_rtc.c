@@ -26,6 +26,7 @@
 #include "qemu/cutils.h"
 #include "qemu/log.h"
 #include "qemu/timer.h"
+#include "system/system.h"
 #include "qapi/error.h"
 #include "migration/vmstate.h"
 #include "hw/core/irq.h"
@@ -46,6 +47,12 @@ static inline unsigned int rtc_unbcd(uint32_t v)
 static void gnw_h7b0_rtc_schedule_alarm_a(GnwH7B0RtcState *s);
 static void gnw_h7b0_rtc_schedule_alarm_b(GnwH7B0RtcState *s);
 static void gnw_h7b0_rtc_schedule_wakeup(GnwH7B0RtcState *s);
+
+static bool gnw_h7b0_rtc_in_init(GnwH7B0RtcState *s)
+{
+    return s->use_rtc_clock && !s->sync_host &&
+           (s->regs[GNW_H7B0_RTC_ICSR >> 2] & RTC_ICSR_INIT);
+}
 
 /* Recompute SSR/TR/DR from the running calendar (reset epoch plus
  * elapsed virtual-clock time since the last read/write) as of
@@ -130,6 +137,7 @@ static void gnw_h7b0_rtc_reanchor_calendar(GnwH7B0RtcState *s)
     uint32_t dr = s->regs[GNW_H7B0_RTC_DR_OFFSET >> 2];
     struct tm tm = { 0 };
 
+    tm.tm_isdst = -1;
     tm.tm_sec = rtc_unbcd(tr & 0x7f);
     tm.tm_min = rtc_unbcd((tr >> 8) & 0x7f);
     tm.tm_hour = rtc_unbcd((tr >> 16) & 0x3f);
@@ -138,7 +146,7 @@ static void gnw_h7b0_rtc_reanchor_calendar(GnwH7B0RtcState *s)
     tm.tm_year = rtc_unbcd((dr >> 16) & 0xff) + 100;
 
     s->rtc_base_epoch = s->rtc_calendar_utc ? mktimegm(&tm) : mktime(&tm);
-    s->rtc_base_vclock_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+    s->rtc_base_vclock_ns = qemu_clock_get_ns(s->clock);
     /* A clock-set invalidates any in-progress shadow snapshot. */
     s->shadow_locked = false;
     gnw_h7b0_rtc_schedule_alarm_a(s);
@@ -271,13 +279,14 @@ static void gnw_h7b0_rtc_schedule_alarm_a(GnwH7B0RtcState *s)
     timer_del(s->alarm_a_timer);
     s->alarm_a_deadline_ns = -1;
     s->alarm_a_remaining_ns = -1;
-    if (!(s->regs[GNW_H7B0_RTC_CR >> 2] & RTC_CR_ALRAE)) {
+    if (gnw_h7b0_rtc_in_init(s) ||
+        !(s->regs[GNW_H7B0_RTC_CR >> 2] & RTC_CR_ALRAE)) {
         return;
     }
     deadline = gnw_h7b0_rtc_next_alarm_ns(
         s, s->regs[GNW_H7B0_RTC_ALRMAR_OFFSET >> 2],
         s->regs[GNW_H7B0_RTC_ALRMASSR_OFFSET >> 2],
-        qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL));
+        qemu_clock_get_ns(s->clock));
     if (deadline >= 0) {
         s->alarm_a_deadline_ns = deadline;
         timer_mod_ns(s->alarm_a_timer, deadline);
@@ -300,13 +309,14 @@ static void gnw_h7b0_rtc_schedule_alarm_b(GnwH7B0RtcState *s)
     timer_del(s->alarm_b_timer);
     s->alarm_b_deadline_ns = -1;
     s->alarm_b_remaining_ns = -1;
-    if (!(s->regs[GNW_H7B0_RTC_CR >> 2] & RTC_CR_ALRBE)) {
+    if (gnw_h7b0_rtc_in_init(s) ||
+        !(s->regs[GNW_H7B0_RTC_CR >> 2] & RTC_CR_ALRBE)) {
         return;
     }
     deadline = gnw_h7b0_rtc_next_alarm_ns(
         s, s->regs[GNW_H7B0_RTC_ALRMBR_OFFSET >> 2],
         s->regs[GNW_H7B0_RTC_ALRMBSSR_OFFSET >> 2],
-        qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL));
+        qemu_clock_get_ns(s->clock));
     if (deadline >= 0) {
         s->alarm_b_deadline_ns = deadline;
         timer_mod_ns(s->alarm_b_timer, deadline);
@@ -358,7 +368,7 @@ static void gnw_h7b0_rtc_schedule_wakeup(GnwH7B0RtcState *s)
     period = gnw_h7b0_rtc_wakeup_period_ns(s);
     if (period > 0) {
         s->wakeup_deadline_ns =
-            qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + period;
+            qemu_clock_get_ns(s->clock) + period;
         timer_mod_ns(s->wakeup_timer, s->wakeup_deadline_ns);
     }
 }
@@ -388,12 +398,14 @@ static void gnw_h7b0_rtc_reset(DeviceState *dev)
                                        | RTC_ICSR_WUTWF | RTC_ICSR_ALRBWF
                                        | RTC_ICSR_ALRAWF;
 
-    /* Keep the established host-local calendar by default. An explicit
-     * Unix epoch opts into a deterministic UTC calendar; either form advances
-     * only with elapsed QEMU_CLOCK_VIRTUAL time. */
-    s->rtc_calendar_utc = s->initial_epoch >= 0;
-    s->rtc_base_epoch = s->rtc_calendar_utc ? s->initial_epoch : time(NULL);
-    s->rtc_base_vclock_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+    /* Upstream defaults reseed a virtual-time calendar at every reset.
+     * Desktop can select rtc_clock and retain the anchor on warm reset. */
+    if (!s->preserve_calendar || !s->calendar_initialized) {
+        s->rtc_calendar_utc = s->initial_epoch >= 0;
+        s->rtc_base_epoch = s->rtc_calendar_utc ? s->initial_epoch : time(NULL);
+        s->rtc_base_vclock_ns = qemu_clock_get_ns(s->clock);
+        s->calendar_initialized = true;
+    }
     s->shadow_locked = false;
     timer_del(s->alarm_a_timer);
     timer_del(s->alarm_b_timer);
@@ -404,9 +416,16 @@ static void gnw_h7b0_rtc_reset(DeviceState *dev)
     s->alarm_b_remaining_ns = -1;
     s->wakeup_deadline_ns = -1;
     s->wakeup_remaining_ns = -1;
-    gnw_h7b0_rtc_sync_calendar(s, s->rtc_base_vclock_ns);
+    gnw_h7b0_rtc_sync_calendar(s, qemu_clock_get_ns(s->clock));
     qemu_irq_lower(s->irq);
     qemu_irq_lower(s->wakeup_irq);
+}
+
+void gnw_h7b0_rtc_backup_domain_reset(GnwH7B0RtcState *s)
+{
+    /* Host-clock timers can fire while the CPU is paused: cancel now. */
+    s->calendar_initialized = false;
+    gnw_h7b0_rtc_reset(DEVICE(s));
 }
 
 /*
@@ -458,19 +477,24 @@ static uint64_t gnw_h7b0_rtc_read(void *opaque, hwaddr addr, unsigned int size)
      * the first of SSR/TR and release on DR, mirroring the hardware
      * guarantee the HAL is written against.
      */
+    if (gnw_h7b0_rtc_in_init(s) &&
+        (addr == GNW_H7B0_RTC_SSR_OFFSET ||
+         addr == GNW_H7B0_RTC_TR_OFFSET || addr == GNW_H7B0_RTC_DR_OFFSET)) {
+        return s->regs[addr >> 2];
+    }
     switch (addr) {
     case GNW_H7B0_RTC_SSR_OFFSET:
     case GNW_H7B0_RTC_TR_OFFSET:
         if (!s->shadow_locked) {
             s->shadow_locked = true;
-            s->shadow_vclock_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+            s->shadow_vclock_ns = qemu_clock_get_ns(s->clock);
         }
         gnw_h7b0_rtc_sync_calendar(s, s->shadow_vclock_ns);
         break;
     case GNW_H7B0_RTC_DR_OFFSET:
         gnw_h7b0_rtc_sync_calendar(s, s->shadow_locked
                                        ? s->shadow_vclock_ns
-                                       : qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL));
+                                       : qemu_clock_get_ns(s->clock));
         s->shadow_locked = false;
         break;
     default:
@@ -496,7 +520,15 @@ static void gnw_h7b0_rtc_write(void *opaque, hwaddr addr,
     value = (s->regs[addr >> 2] & ~mask) | (value & mask);
 
     switch (addr) {
-    case GNW_H7B0_RTC_ICSR:
+    case GNW_H7B0_RTC_ICSR: {
+        bool was_init = gnw_h7b0_rtc_in_init(s);
+        bool new_init = s->use_rtc_clock && !s->sync_host &&
+                        (value & RTC_ICSR_INIT);
+
+        if (!was_init && new_init) {
+            gnw_h7b0_rtc_sync_calendar(s, qemu_clock_get_ns(s->clock));
+            s->shadow_locked = false;
+        }
         /*
          * HAL_RTC_WaitForSynchro() writes ICSR to clear RSF before
          * polling it back set; RTC_EnterInitMode() sets INIT and
@@ -523,7 +555,19 @@ static void gnw_h7b0_rtc_write(void *opaque, hwaddr addr,
                               | RTC_ICSR_INITF | RTC_ICSR_RSF | RTC_ICSR_INITS
                               | RTC_ICSR_WUTWF | RTC_ICSR_ALRBWF
                               | RTC_ICSR_ALRAWF;
+        if (s->use_rtc_clock && !s->sync_host) {
+            if (!new_init) {
+                s->regs[addr >> 2] &= ~RTC_ICSR_INITF;
+            }
+            if (was_init && !new_init) {
+                gnw_h7b0_rtc_reanchor_calendar(s);
+            } else if (!was_init && new_init) {
+                gnw_h7b0_rtc_schedule_alarm_a(s);
+                gnw_h7b0_rtc_schedule_alarm_b(s);
+            }
+        }
         return;
+    }
     case GNW_H7B0_RTC_WPR_OFFSET:
         /* WPR is write-only; real hardware/SVD always read it back as 0. */
         s->regs[addr >> 2] = 0;
@@ -580,7 +624,9 @@ static void gnw_h7b0_rtc_write(void *opaque, hwaddr addr,
             return;
         }
         s->regs[addr >> 2] = value;
-        gnw_h7b0_rtc_reanchor_calendar(s);
+        if (!gnw_h7b0_rtc_in_init(s)) {
+            gnw_h7b0_rtc_reanchor_calendar(s);
+        }
         return;
     case GNW_H7B0_RTC_ALRMAR_OFFSET:
         s->regs[addr >> 2] = value;
@@ -650,12 +696,6 @@ static void gnw_h7b0_rtc_init(Object *obj)
     sysbus_init_mmio(SYS_BUS_DEVICE(obj), &s->mmio);
     sysbus_init_irq(SYS_BUS_DEVICE(obj), &s->irq);
     sysbus_init_irq(SYS_BUS_DEVICE(obj), &s->wakeup_irq);
-    s->alarm_a_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL,
-                                    gnw_h7b0_rtc_alarm_a_tick, s);
-    s->alarm_b_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL,
-                                    gnw_h7b0_rtc_alarm_b_tick, s);
-    s->wakeup_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL,
-                                   gnw_h7b0_rtc_wakeup_tick, s);
 }
 
 static void gnw_h7b0_rtc_realize(DeviceState *dev, Error **errp)
@@ -665,14 +705,25 @@ static void gnw_h7b0_rtc_realize(DeviceState *dev, Error **errp)
     if (s->initial_epoch < -1) {
         error_setg(errp, "initial-epoch must be -1 (host-local default) or "
                    "a nonnegative Unix epoch");
+        return;
     }
+    s->clock = s->use_rtc_clock ? rtc_clock : QEMU_CLOCK_VIRTUAL;
+    s->alarm_a_timer = timer_new_ns(s->clock,
+                                    gnw_h7b0_rtc_alarm_a_tick, s);
+    s->alarm_b_timer = timer_new_ns(s->clock,
+                                    gnw_h7b0_rtc_alarm_b_tick, s);
+    s->wakeup_timer = timer_new_ns(s->clock,
+                                   gnw_h7b0_rtc_wakeup_tick, s);
 }
 
 static int gnw_h7b0_rtc_post_load(void *opaque, int version_id)
 {
     GnwH7B0RtcState *s = opaque;
-    int64_t now_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+    int64_t now_ns = qemu_clock_get_ns(s->clock);
 
+    if (version_id < 6) {
+        s->calendar_initialized = true;
+    }
     if (version_id < 3) {
         /* Older snapshots only stored the host-local calendar convention. */
         s->rtc_calendar_utc = false;
@@ -680,7 +731,8 @@ static int gnw_h7b0_rtc_post_load(void *opaque, int version_id)
     timer_del(s->alarm_a_timer);
     timer_del(s->alarm_b_timer);
     timer_del(s->wakeup_timer);
-    if (s->regs[GNW_H7B0_RTC_CR >> 2] & RTC_CR_ALRAE) {
+    if (!gnw_h7b0_rtc_in_init(s) &&
+        (s->regs[GNW_H7B0_RTC_CR >> 2] & RTC_CR_ALRAE)) {
         if (version_id >= 4 && s->alarm_a_remaining_ns > 0) {
             s->alarm_a_deadline_ns = now_ns + s->alarm_a_remaining_ns;
             timer_mod_ns(s->alarm_a_timer, s->alarm_a_deadline_ns);
@@ -693,7 +745,8 @@ static int gnw_h7b0_rtc_post_load(void *opaque, int version_id)
     } else {
         s->alarm_a_deadline_ns = -1;
     }
-    if (s->regs[GNW_H7B0_RTC_CR >> 2] & RTC_CR_ALRBE) {
+    if (!gnw_h7b0_rtc_in_init(s) &&
+        (s->regs[GNW_H7B0_RTC_CR >> 2] & RTC_CR_ALRBE)) {
         if (version_id >= 5 && s->alarm_b_remaining_ns > 0) {
             s->alarm_b_deadline_ns = now_ns + s->alarm_b_remaining_ns;
             timer_mod_ns(s->alarm_b_timer, s->alarm_b_deadline_ns);
@@ -730,20 +783,20 @@ static int gnw_h7b0_rtc_pre_save(void *opaque)
     if (timer_pending(s->alarm_a_timer)) {
         s->alarm_a_remaining_ns = MAX(
             s->alarm_a_deadline_ns -
-                qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL),
+                qemu_clock_get_ns(s->clock),
             0);
     } else {
         s->alarm_a_remaining_ns = -1;
     }
     if (timer_pending(s->alarm_b_timer)) {
         s->alarm_b_remaining_ns = MAX(
-            s->alarm_b_deadline_ns - qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL), 0);
+            s->alarm_b_deadline_ns - qemu_clock_get_ns(s->clock), 0);
     } else {
         s->alarm_b_remaining_ns = -1;
     }
     if (timer_pending(s->wakeup_timer)) {
         s->wakeup_remaining_ns = MAX(
-            s->wakeup_deadline_ns - qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL), 0);
+            s->wakeup_deadline_ns - qemu_clock_get_ns(s->clock), 0);
     } else {
         s->wakeup_remaining_ns = -1;
     }
@@ -752,7 +805,7 @@ static int gnw_h7b0_rtc_pre_save(void *opaque)
 
 static const VMStateDescription vmstate_gnw_h7b0_rtc = {
     .name = TYPE_GNW_H7B0_RTC,
-    .version_id = 5,
+    .version_id = 6,
     .minimum_version_id = 1,
     .pre_save = gnw_h7b0_rtc_pre_save,
     .fields = (const VMStateField[]) {
@@ -770,12 +823,15 @@ static const VMStateDescription vmstate_gnw_h7b0_rtc = {
         VMSTATE_INT64_V(alarm_a_remaining_ns, GnwH7B0RtcState, 4),
         VMSTATE_INT64_V(alarm_b_remaining_ns, GnwH7B0RtcState, 5),
         VMSTATE_INT64_V(wakeup_remaining_ns, GnwH7B0RtcState, 5),
+        VMSTATE_BOOL_V(calendar_initialized, GnwH7B0RtcState, 6),
         VMSTATE_END_OF_LIST()
     },
     .post_load = gnw_h7b0_rtc_post_load,
 };
 
 static const Property gnw_h7b0_rtc_properties[] = {
+    DEFINE_PROP_BOOL("use-rtc-clock", GnwH7B0RtcState, use_rtc_clock, false),
+    DEFINE_PROP_BOOL("preserve-calendar", GnwH7B0RtcState, preserve_calendar, false),
     DEFINE_PROP_BOOL("sync-host", GnwH7B0RtcState, sync_host, true),
     DEFINE_PROP_INT64("initial-epoch", GnwH7B0RtcState, initial_epoch, -1),
 };
