@@ -491,9 +491,14 @@ static bool gnw_h7b0_init_ram_or_file(MemoryRegion *mr, Object *owner,
 
 static uint8_t *gnw_h7b0_load_unlock_baseline(const char *image_path,
                                               const uint8_t *extflash,
+                                              uint64_t extflash_size,
                                               bool refresh, Error **errp)
 {
     uint8_t *baseline = g_malloc(GNW_UNLOCK_BASELINE_SIZE);
+    /* The Zelda baseline span exceeds Mario's 1 MiB NOR mapping. Keep the
+     * sidecar format stable, but never read beyond the selected chip. */
+    memset(baseline, 0xFF, GNW_UNLOCK_BASELINE_SIZE);
+    memcpy(baseline, extflash, MIN(extflash_size, GNW_UNLOCK_BASELINE_SIZE));
 
     if (!refresh && image_path && image_path[0]) {
         char *path = g_strdup_printf("%s.gnw-unlock-baseline", image_path);
@@ -520,7 +525,6 @@ static uint8_t *gnw_h7b0_load_unlock_baseline(const char *image_path,
         }
         g_clear_error(&local_err);
 
-        memcpy(baseline, extflash, GNW_UNLOCK_BASELINE_SIZE);
         if (!g_file_set_contents(path, (const gchar *)baseline,
                                  GNW_UNLOCK_BASELINE_SIZE, &local_err)) {
             error_setg(errp, "cannot save unlock baseline '%s': %s", path,
@@ -534,7 +538,6 @@ static uint8_t *gnw_h7b0_load_unlock_baseline(const char *image_path,
         return baseline;
     }
 
-    memcpy(baseline, extflash, GNW_UNLOCK_BASELINE_SIZE);
     return baseline;
 }
 
@@ -1365,6 +1368,7 @@ static void gnw_h7b0_soc_realize(DeviceState *dev_soc, Error **errp)
     s->gpio.syscfg = &s->syscfg;
     s->extflash_unlock_baseline = gnw_h7b0_load_unlock_baseline(
         s->extflash_image, memory_region_get_ram_ptr(&s->extflash),
+        memory_region_size(&s->extflash),
         s->flash_r.rdp_value != 0x55, errp);
     if (!s->extflash_unlock_baseline) {
         return;
