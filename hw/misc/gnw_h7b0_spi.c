@@ -48,6 +48,33 @@ static void gnw_h7b0_spi_update_irq(GnwH7B0SpiState *s)
     qemu_set_irq(s->irq, !!(sr & ier & GNW_H7B0_SPI_IRQ_MASK));
 }
 
+static void gnw_h7b0_spi_update_rx_level(GnwH7B0SpiState *s)
+{
+    uint32_t level = (s->rx_count & 3U) << 13;
+    if (s->rx_count >= 4) {
+        level |= 1U << 15; /* RXWNE: at least one complete word available. */
+    }
+    if (s->rx_count) {
+        level |= SPI_SR_RXP;
+    }
+    s->regs[GNW_H7B0_SPI_SR >> 2] =
+        (s->regs[GNW_H7B0_SPI_SR >> 2] &
+         ~(SPI_SR_RXP | SPI_SR_RXLEVEL_MASK)) | level;
+}
+
+static void gnw_h7b0_spi_receive_byte(GnwH7B0SpiState *s, uint8_t byte)
+{
+    /* Preserve unread data on overflow. Full electrical OVR/FIFO-threshold
+     * behaviour is outside this byte-oriented functional model. */
+    if (s->rx_count == GNW_H7B0_SPI_RX_FIFO_SIZE) {
+        return;
+    }
+    s->rx_fifo[(s->rx_head + s->rx_count) % GNW_H7B0_SPI_RX_FIFO_SIZE] = byte;
+    s->rx_count++;
+    s->regs[GNW_H7B0_SPI_RXDR >> 2] = byte;
+    gnw_h7b0_spi_update_rx_level(s);
+}
+
 /*
  * TXDR completion used to be deferred by a small QEMUTimer-paced delay
  * here, meant to fix retro-go-sd's user_diskio_spi.c busy-wait loops
@@ -184,11 +211,10 @@ static void gnw_h7b0_spi_dma_rx_notify(void *opaque, bool half,
         }
         cpu_physical_memory_write(m0ar + off, rxbuf, chunk);
 
-        /* Mirror the last byte into RXDR/SR.RXP like the polled TXDR
-         * path does -- firmware that peeks at RXDR after a DMA transfer
-         * then sees the same thing hardware would have left there. */
-        s->regs[GNW_H7B0_SPI_RXDR >> 2] = rxbuf[chunk - 1];
-        s->regs[GNW_H7B0_SPI_SR >> 2] |= SPI_SR_RXP;
+        /* DMA already consumed the data phase. Preserve the existing final
+         * byte mirror without accumulating another FIFO for each DMA chunk. */
+        s->rx_head = s->rx_count = 0;
+        gnw_h7b0_spi_receive_byte(s, rxbuf[chunk - 1]);
 
         off += chunk;
         len -= chunk;
@@ -225,6 +251,7 @@ static void gnw_h7b0_spi_dma_rx_notify(void *opaque, bool half,
         }
     }
 
+    gnw_h7b0_spi_update_irq(s);
     if (!half) {
         gnw_h7b0_spi_dma_stream_done(s, GNW_H7B0_SPI_DMA_PEND_RX);
     }
@@ -275,6 +302,8 @@ static void gnw_h7b0_spi_reset(DeviceState *dev)
     }
     memset(s->logged_unimp, 0, sizeof(s->logged_unimp));
     s->dma_pending = 0;
+    s->rx_head = s->rx_count = 0;
+    memset(s->rx_fifo, 0, sizeof(s->rx_fifo));
     /*
      * TXP ("Tx-Packet space available") reflects TxFIFO occupancy on
      * real hardware, which is trivially available even before the
@@ -298,7 +327,20 @@ static uint64_t gnw_h7b0_spi_read(void *opaque, hwaddr addr, unsigned int size)
                       __func__, addr);
         return 0;
     }
-    return s->regs[addr >> 2];
+    uint32_t value = s->regs[addr >> 2];
+    if (addr == GNW_H7B0_SPI_RXDR) {
+        if (s->rx_count) {
+            value = 0;
+            for (unsigned i = 0; i < size && s->rx_count; i++) {
+                value |= (uint32_t)s->rx_fifo[s->rx_head] << (i * 8);
+                s->rx_head = (s->rx_head + 1) % GNW_H7B0_SPI_RX_FIFO_SIZE;
+                s->rx_count--;
+            }
+        }
+        gnw_h7b0_spi_update_rx_level(s);
+        gnw_h7b0_spi_update_irq(s);
+    }
+    return value;
 }
 
 static void gnw_h7b0_spi_write(void *opaque, hwaddr addr,
@@ -344,7 +386,9 @@ static void gnw_h7b0_spi_write(void *opaque, hwaddr addr,
              * disable-gated, matching real hardware clearing status
              * on disable.
              */
-            s->regs[GNW_H7B0_SPI_SR >> 2] &= ~(SPI_SR_EOT | SPI_SR_RXP);
+            s->regs[GNW_H7B0_SPI_SR >> 2] &=
+                ~(SPI_SR_EOT | SPI_SR_RXP | SPI_SR_RXLEVEL_MASK);
+            s->rx_head = s->rx_count = 0;
             /* HAL_SPI_Abort() disables the peripheral; drop any transfer
              * still armed so a later one doesn't inherit its state. */
             s->dma_pending = 0;
@@ -402,14 +446,12 @@ static void gnw_h7b0_spi_write(void *opaque, hwaddr addr,
         if (s->ssi) {
             /* Real SSI byte exchange with the attached virtual SD card. */
             uint32_t rx = s->softspi ? 0xff : ssi_transfer(s->ssi, value & 0xff);
-            s->regs[GNW_H7B0_SPI_RXDR >> 2] = rx;
             /*
-             * RXP must be set whenever a real byte lands in RXDR --
-             * HAL_SPI_TransmitReceive() polls RXP (not EOT) before
-             * reading each received byte. See gnw_h7b0_spi.h's file
-             * comment for the "No SD Card found" bug this caused.
+             * Receive occupancy reports both RXP and RXPLVL.
+             * STM32H7 HAL variants poll either RXP or RXWNE/FRLVL before
+             * reading the byte; RXWNE stays clear with less than a word.
              */
-            s->regs[GNW_H7B0_SPI_SR >> 2] |= SPI_SR_RXP;
+            gnw_h7b0_spi_receive_byte(s, rx);
         }
         s->regs[GNW_H7B0_SPI_SR >> 2] |= SPI_SR_EOT;
         /*
@@ -490,13 +532,42 @@ static void gnw_h7b0_spi_realize(DeviceState *dev, Error **errp)
                             &error_fatal);
 }
 
+static int gnw_h7b0_spi_post_load(void *opaque, int version_id)
+{
+    GnwH7B0SpiState *s = GNW_H7B0_SPI(opaque);
+    if (version_id < 3) {
+        /* Version2 had only an unread-byte mirror in RXDR/RXP. */
+        s->rx_head = 0;
+        s->rx_count = !!(s->regs[GNW_H7B0_SPI_SR >> 2] & SPI_SR_RXP);
+        memset(s->rx_fifo, 0, sizeof(s->rx_fifo));
+        s->rx_fifo[0] = s->regs[GNW_H7B0_SPI_RXDR >> 2];
+    }
+    if (s->rx_head >= GNW_H7B0_SPI_RX_FIFO_SIZE ||
+        s->rx_count > GNW_H7B0_SPI_RX_FIFO_SIZE) {
+        /* A failed load leaves the VM paused, but MMIO diagnostics are still
+         * available. Do not leave an invalid cursor accessible through RXDR. */
+        s->rx_head = s->rx_count = 0;
+        gnw_h7b0_spi_update_rx_level(s);
+        gnw_h7b0_spi_update_irq(s);
+        return -EINVAL;
+    }
+    gnw_h7b0_spi_update_rx_level(s);
+    gnw_h7b0_spi_update_irq(s);
+    return 0;
+}
+
 static const VMStateDescription vmstate_gnw_h7b0_spi = {
     .name = TYPE_GNW_H7B0_SPI,
-    .version_id = 2,
+    .version_id = 3,
     .minimum_version_id = 2,
+    .post_load = gnw_h7b0_spi_post_load,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT32_ARRAY(regs, GnwH7B0SpiState, GNW_H7B0_SPI_SIZE / 4),
         VMSTATE_UINT8(dma_pending, GnwH7B0SpiState),
+        VMSTATE_UINT8_ARRAY_V(rx_fifo, GnwH7B0SpiState,
+                             GNW_H7B0_SPI_RX_FIFO_SIZE, 3),
+        VMSTATE_UINT8_V(rx_head, GnwH7B0SpiState, 3),
+        VMSTATE_UINT8_V(rx_count, GnwH7B0SpiState, 3),
         VMSTATE_END_OF_LIST()
     }
 };

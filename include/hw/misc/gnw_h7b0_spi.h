@@ -104,6 +104,9 @@ OBJECT_DECLARE_SIMPLE_TYPE(GnwH7B0SpiState, GNW_H7B0_SPI)
 #define SPI_SR_TXP          (1U << 1)
 #define SPI_SR_EOT          (1U << 3)
 #define SPI_SR_TXTF         (1U << 4)
+#define SPI_SR_RXPLVL_ONE   (1U << 13)
+#define SPI_SR_RXLEVEL_MASK ((3U << 13) | (1U << 15))
+#define GNW_H7B0_SPI_RX_FIFO_SIZE 16
 
 #define GNW_H7B0_SPI_IFCR   0x18
 /* IFCR bit positions mirror SR's TXP/EOT/etc exactly. */
@@ -149,6 +152,11 @@ struct GnwH7B0SpiState {
      * TCIF to return hdmatx to HAL_DMA_STATE_READY for the next block.
      */
     uint8_t dma_pending;
+    /* Byte-oriented receive FIFO: RetroGo can clock the next byte before
+     * consuming the previous one, using a cached SR. No packed TX modelling. */
+    uint8_t rx_fifo[GNW_H7B0_SPI_RX_FIFO_SIZE];
+    uint8_t rx_head;
+    uint8_t rx_count;
 
     /* Set by gnw_h7b0_spi_set_dma() for SPI1 only (the SD-card SPI);
      * NULL on SPI2, which drives the LCD panel with no DMA at all. */
