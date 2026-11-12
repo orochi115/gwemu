@@ -6,9 +6,11 @@
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 #include "qemu/osdep.h"
+#include <math.h>
 #include "gnw_h7b0_power.h"
 #include "qapi/error.h"
 #include "system/runstate.h"
+#include "migration/vmstate.h"
 
 bool gnw_h7b0_power_is_supplied(const GnwH7B0Power *s)
 {
@@ -121,5 +123,74 @@ void gnw_h7b0_power_free(GnwH7B0Power *s)
 {
     if (s->timer) {
         timer_free(s->timer);
+    }
+}
+
+static int power_pre_save(void *opaque)
+{
+    GnwH7B0Power *s = opaque;
+
+    power_settle(s);
+    memcpy(&s->saved_level_bits, &s->level, sizeof(s->level));
+    s->tick_remaining_ns = s->timer && timer_pending(s->timer) ?
+        MAX(timer_expire_time_ns(s->timer) - s->last_update_ns, 0) : -1;
+    return 0;
+}
+
+static int power_post_load(void *opaque, int version_id)
+{
+    GnwH7B0Power *s = opaque;
+
+    memcpy(&s->level, &s->saved_level_bits, sizeof(s->level));
+    if (!isfinite(s->level) || s->level < 0 || s->level > 100 ||
+        s->battery != (uint32_t)(s->level + 0.5) || s->tick_remaining_ns < -1) {
+        return -EINVAL;
+    }
+    s->transitioning = false;
+    s->last_update_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+    if (s->timer) {
+        timer_del(s->timer);
+        if (s->tick_remaining_ns >= 0) {
+            timer_mod(s->timer, s->last_update_ns + s->tick_remaining_ns);
+        }
+    }
+    /* GPIO/ADC/SYSCFG/EXTI must all be loaded before reapplying inputs. */
+    return 0;
+}
+
+static const VMStateDescription vmstate_power = {
+    .name = "gnw-h7b0-board-power",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .pre_save = power_pre_save,
+    .post_load = power_post_load,
+    .fields = (const VMStateField[]) {
+        VMSTATE_BOOL(usb, GnwH7B0Power),
+        VMSTATE_BOOL(battery_present, GnwH7B0Power),
+        VMSTATE_UINT32(battery, GnwH7B0Power),
+        VMSTATE_UINT64(saved_level_bits, GnwH7B0Power),
+        VMSTATE_INT64(tick_remaining_ns, GnwH7B0Power),
+        VMSTATE_END_OF_LIST()
+    },
+};
+
+void gnw_h7b0_power_snapshot_register(GnwH7B0Power *s)
+{
+    vmstate_register(NULL, 0, &vmstate_power, s);
+}
+
+void gnw_h7b0_power_snapshot_settle(GnwH7B0Power *s)
+{
+    if (s->enabled) {
+        power_settle(s);
+    }
+}
+
+void gnw_h7b0_power_restore(GnwH7B0Power *s)
+{
+    if (s->enabled) {
+        /* Restore the execution gate directly, never invoke a cold transition. */
+        s->soc->supply_present = gnw_h7b0_power_is_supplied(s);
+        power_apply(s);
     }
 }

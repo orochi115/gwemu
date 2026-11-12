@@ -338,6 +338,10 @@ static void gnw_h7b0_sai1_rcc_clock_changed(void *opaque)
 {
     GnwH7B0Sai1State *s = GNW_H7B0_SAI1(opaque);
 
+    if (s->snapshot_restoring) {
+        return;
+    }
+
     gnw_h7b0_sai1_update_voice(s);
     gnw_h7b0_sai1_dma_state_changed(s);
 }
@@ -661,6 +665,33 @@ void gnw_h7b0_sai1_set_dma(GnwH7B0Sai1State *s, GnwH7B0DmaState *dma)
      * nothing to gain by unbinding.
      */
     gnw_h7b0_sai1_bind_dma(s);
+}
+
+void gnw_h7b0_sai1_snapshot_prepare(GnwH7B0Sai1State *s)
+{
+    /* Reset/RCC load must not retime a DMA stream before its phase is loaded. */
+    s->snapshot_restoring = true;
+    if (s->voice) {
+        audio_be_set_active_out(s->audio_be, s->voice, false);
+        /* Reopening an equal-rate voice reuses its queued backend samples.
+         * Destroy the old voice so post-load output starts with empty state. */
+        audio_be_close_out(s->audio_be, s->voice);
+        s->voice = NULL;
+    }
+    s->voice_open = false;
+    s->voice_rate_hz = 0;
+    s->host_audio_backpressured = false;
+    if (s->fifo_inited) {
+        fifo8_reset(&s->fifo);
+    }
+}
+
+void gnw_h7b0_sai1_snapshot_restore(GnwH7B0Sai1State *s)
+{
+    s->snapshot_restoring = false;
+    /* Host mute remains current. Restore voice/rate after RCC+SAI have loaded,
+     * without rebinding DMA or replacing its restored timer/half-buffer phase. */
+    gnw_h7b0_sai1_update_voice(s);
 }
 
 void gnw_h7b0_sai1_set_rcc(GnwH7B0Sai1State *s, GnwH7B0RccState *rcc)

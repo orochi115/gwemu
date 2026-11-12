@@ -3,11 +3,13 @@
 #define GNW_H7B0_STATE_H
 
 #include "hw/arm/gnw_h7b0_soc.h"
+#include "gnw_h7b0_power.h"
 
 typedef struct GnwH7B0Snapshot {
     bool enabled;
     char *id;
     GnwH7B0State *soc;
+    GnwH7B0Power *power;
     int64_t rtc_clock_at_save;
 } GnwH7B0Snapshot;
 

@@ -128,6 +128,10 @@ static void gnw_h7b0_init(MachineState *machine)
     sysbus_realize_and_unref(SYS_BUS_DEVICE(dev), &error_fatal);
     gnw_h7b0_state_init(&s->state, GNW_H7B0_SOC(dev));
     gnw_h7b0_power_start(&s->power, GNW_H7B0_SOC(dev));
+    s->state.power = &s->power;
+    if (s->state.enabled) {
+        gnw_h7b0_power_snapshot_register(&s->power);
+    }
 
     armv7m_load_kernel(ARM_CPU(first_cpu),
                         machine->kernel_filename,

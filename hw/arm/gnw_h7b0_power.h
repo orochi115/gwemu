@@ -15,6 +15,8 @@ typedef struct GnwH7B0Power {
     uint32_t charge_time_min;
     double level;
     int64_t last_update_ns;
+    uint64_t saved_level_bits;
+    int64_t tick_remaining_ns;
     GnwH7B0State *soc;
     QEMUTimer *timer;
 } GnwH7B0Power;
@@ -25,5 +27,8 @@ bool gnw_h7b0_power_is_supplied(const GnwH7B0Power *s);
 void gnw_h7b0_power_set_usb(GnwH7B0Power *s, bool usb, Error **errp);
 void gnw_h7b0_power_set_present(GnwH7B0Power *s, bool present, Error **errp);
 void gnw_h7b0_power_free(GnwH7B0Power *s);
+void gnw_h7b0_power_snapshot_register(GnwH7B0Power *s);
+void gnw_h7b0_power_snapshot_settle(GnwH7B0Power *s);
+void gnw_h7b0_power_restore(GnwH7B0Power *s);
 
 #endif

@@ -110,6 +110,10 @@ struct GnwH7B0GpioState {
     size_t extflash_size;
     size_t extflash_baseline_size;
     bool unlock_handoff_active;
+    uint64_t handoff_epoch;
+    unsigned pending_handoffs;
+    bool host_buttons[16];
+    int64_t pa0_remaining_ns;
     QEMUTimer *pa0_release_timer;
     /*
      * Optional keyboard-remap property ("keymap"): comma-separated
@@ -140,5 +144,6 @@ bool gnw_h7b0_gpio_try_boot_handoff(GnwH7B0GpioState *s,
                                     bool *stock_itcm_ready);
 void gnw_timeline_record_quit(void);
 void gnw_h7b0_gpio_set_power(GnwH7B0GpioState *s, bool usb, bool charging);
+void gnw_h7b0_gpio_snapshot_quiesce(GnwH7B0GpioState *s, bool discard);
 
 #endif

@@ -25,8 +25,8 @@
 #endif
 
 #define STATE_MAGIC 0x4757454d55535431ULL /* GWEMUST1, distinct from GNWSTAT1 */
-#define STATE_VERSION 1
-#define IDENTITY_SIZE 228
+#define STATE_VERSION 2
+#define IDENTITY_SIZE 240
 #define HEADER_SIZE (IDENTITY_SIZE + 8 + 32)
 #define MAX_PAYLOAD (256 * MiB)
 
@@ -172,6 +172,9 @@ static QIOChannelBuffer *identity(GnwH7B0Snapshot *state)
     /* This immutable decoder baseline is never replaced by guest Flash. */
     put_digest(f, s->extflash_unlock_baseline, GNW_UNLOCK_BASELINE_SIZE);
     put_digest(f, s->cold_itcm_seed, memory_region_size(&s->itcm));
+    qemu_put_be32(f, state->power->enabled);
+    qemu_put_be32(f, state->power->battery_life_min);
+    qemu_put_be32(f, state->power->charge_time_min);
     finish_buffer(f, buf);
     assert(buf->usage == IDENTITY_SIZE);
     return buf;
@@ -286,11 +289,19 @@ void gnw_h7b0_state_file(GnwH7B0Snapshot *s, const char *path, bool load,
             goto out;
         }
         vm_stop(RUN_STATE_RESTORE_VM);
+        gnw_h7b0_gpio_snapshot_quiesce(&s->soc->gpio, true);
+        gnw_h7b0_sai1_snapshot_prepare(&s->soc->sai1);
         qemu_system_reset(SHUTDOWN_CAUSE_SNAPSHOT_LOAD);
         f = qemu_file_new_input(QIO_CHANNEL(payload));
         ret = qemu_loadvm_state(f, errp);
         migration_incoming_state_destroy();
         vm_stop(RUN_STATE_PAUSED);
+        if (!ret) {
+            gnw_h7b0_power_restore(s->power);
+            gnw_h7b0_otfdec_snapshot_restore(&s->soc->otfdec1);
+            gnw_h7b0_otfdec_snapshot_restore(&s->soc->otfdec2);
+            gnw_h7b0_sai1_snapshot_restore(&s->soc->sai1);
+        }
         if (!ret &&
             (!sync_flash(&s->soc->flash_bank1, s->soc->bank1_image, errp) ||
              !sync_flash(&s->soc->flash_bank2, s->soc->bank2_image, errp) ||
@@ -299,6 +310,9 @@ void gnw_h7b0_state_file(GnwH7B0Snapshot *s, const char *path, bool load,
             ret = -EIO;
         }
     } else {
+        /* Settle CPU work and board inputs before ANY device/CPU serializes. */
+        gnw_h7b0_gpio_snapshot_quiesce(&s->soc->gpio, false);
+        gnw_h7b0_power_snapshot_settle(s->power);
         payload = qio_channel_buffer_new(MiB);
         f = qemu_file_new_output(QIO_CHANNEL(payload));
         global_state_store();

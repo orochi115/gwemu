@@ -258,6 +258,14 @@ void gnw_h7b0_otfdec_set_extflash(GnwH7B0OtfdecState *s,
     s->extflash_size = extflash_size;
 }
 
+void gnw_h7b0_otfdec_snapshot_restore(GnwH7B0OtfdecState *s)
+{
+    /* Called only after raw Flash RAM and all device registers have loaded. */
+    for (int region = 1; region <= OTFDEC_NUM_REGIONS; region++) {
+        otfdec_update_region_mapping(s, region);
+    }
+}
+
 static void gnw_h7b0_otfdec_reset(DeviceState *dev)
 {
     GnwH7B0OtfdecState *s = GNW_H7B0_OTFDEC(dev);

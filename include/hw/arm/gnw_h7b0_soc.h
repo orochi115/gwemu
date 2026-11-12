@@ -603,6 +603,9 @@ struct GnwH7B0State {
     QEMUTimer *startup_handoff_timer;
     QEMUTimer *cold_power_on_timer;
     QEMUTimer *cold_power_release_timer;
+    int64_t startup_handoff_remaining_ns;
+    int64_t cold_power_on_remaining_ns;
+    int64_t cold_power_release_remaining_ns;
     unsigned startup_handoff_attempts;
     bool initial_boot_handoff_pending;
     bool ui_reset_to_fault_pending;

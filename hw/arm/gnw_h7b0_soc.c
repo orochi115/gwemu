@@ -1705,6 +1705,62 @@ struct GnwH7B0StateClass {
     ResettablePhases parent_phases;
 };
 
+static int soc_runtime_pre_save(void *opaque)
+{
+    GnwH7B0State *s = opaque;
+    int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+
+#define SAVE_TIMER(field) \
+    s->field##_remaining_ns = timer_pending(s->field##_timer) ? \
+        MAX(timer_expire_time_ns(s->field##_timer) - now, 0) : -1
+    SAVE_TIMER(startup_handoff);
+    SAVE_TIMER(cold_power_on);
+    SAVE_TIMER(cold_power_release);
+#undef SAVE_TIMER
+    return 0;
+}
+
+static int soc_runtime_post_load(void *opaque, int version_id)
+{
+    GnwH7B0State *s = opaque;
+    int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+
+    if (s->startup_handoff_remaining_ns < -1 ||
+        s->cold_power_on_remaining_ns < -1 ||
+        s->cold_power_release_remaining_ns < -1 ||
+        s->startup_handoff_attempts > GNW_STARTUP_HANDOFF_MAX_ATTEMPTS + 1) {
+        return -EINVAL;
+    }
+#define RESTORE_TIMER(field) \
+    timer_del(s->field##_timer); \
+    if (s->field##_remaining_ns >= 0) { \
+        timer_mod(s->field##_timer, now + s->field##_remaining_ns); \
+    }
+    RESTORE_TIMER(startup_handoff);
+    RESTORE_TIMER(cold_power_on);
+    RESTORE_TIMER(cold_power_release);
+#undef RESTORE_TIMER
+    return 0;
+}
+
+static const VMStateDescription vmstate_soc_runtime = {
+    .name = "gnw-h7b0-soc-runtime",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .pre_save = soc_runtime_pre_save,
+    .post_load = soc_runtime_post_load,
+    .fields = (const VMStateField[]) {
+        VMSTATE_INT64(startup_handoff_remaining_ns, GnwH7B0State),
+        VMSTATE_INT64(cold_power_on_remaining_ns, GnwH7B0State),
+        VMSTATE_INT64(cold_power_release_remaining_ns, GnwH7B0State),
+        VMSTATE_UINT32(startup_handoff_attempts, GnwH7B0State),
+        VMSTATE_BOOL(initial_boot_handoff_pending, GnwH7B0State),
+        VMSTATE_BOOL(ui_reset_to_fault_pending, GnwH7B0State),
+        VMSTATE_BOOL(supply_present, GnwH7B0State),
+        VMSTATE_END_OF_LIST()
+    },
+};
+
 static void gnw_h7b0_soc_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
@@ -1715,6 +1771,7 @@ static void gnw_h7b0_soc_class_init(ObjectClass *klass, const void *data)
                                        &sc->parent_phases);
 
     dc->realize = gnw_h7b0_soc_realize;
+    dc->vmsd = &vmstate_soc_runtime;
     device_class_set_props(dc, gnw_h7b0_soc_properties);
     object_class_property_add(klass, "x-hclk-hz", "uint64",
                               gnw_h7b0_soc_get_hclk_hz, NULL, NULL, NULL);

@@ -30,6 +30,9 @@
 #define TYPE_GNW_H7B0_SAI1 "gnw-h7b0-sai1"
 OBJECT_DECLARE_SIMPLE_TYPE(GnwH7B0Sai1State, GNW_H7B0_SAI1)
 
+void gnw_h7b0_sai1_snapshot_prepare(GnwH7B0Sai1State *s);
+void gnw_h7b0_sai1_snapshot_restore(GnwH7B0Sai1State *s);
+
 #define GNW_H7B0_SAI1_SIZE 0x400
 
 /* DMAMUX1 DMAREQ_ID for SAI1 Block A Tx (sai1_a_dma) -- see RM0455's
@@ -72,6 +75,7 @@ struct GnwH7B0Sai1State {
     bool voice_open;
     /* Host presentation setting; guest DMA and sample timing remain active. */
     bool audio_muted;
+    bool snapshot_restoring;
     Notifier exit_notifier;
     bool exit_notifier_registered;
     /* Host presentation rate currently programmed into voice. */

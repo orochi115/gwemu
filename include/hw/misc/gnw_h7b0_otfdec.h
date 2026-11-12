@@ -50,6 +50,8 @@
 #define TYPE_GNW_H7B0_OTFDEC "gnw-h7b0-otfdec"
 OBJECT_DECLARE_SIMPLE_TYPE(GnwH7B0OtfdecState, GNW_H7B0_OTFDEC)
 
+void gnw_h7b0_otfdec_snapshot_restore(GnwH7B0OtfdecState *s);
+
 #define GNW_H7B0_OTFDEC_SIZE 0x400
 
 #define OTFDEC_REGION_BASE   0x20

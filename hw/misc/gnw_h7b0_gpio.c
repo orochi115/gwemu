@@ -100,6 +100,8 @@ static const GnwButtonPin gnw_h7b0_button_pins[GNW_BTN__COUNT] = {
 #define GNW_UNLOCK_ENTRY_OFFSET 0x4a0
 
 typedef struct GnwUnlockHandoff {
+    GnwH7B0GpioState *gpio;
+    uint64_t epoch;
     uint8_t *itcm;
     size_t itcm_offset;
     uint8_t payload[GNW_UNLOCK_PAYLOAD_SIZE];
@@ -110,11 +112,29 @@ static void gnw_h7b0_gpio_run_unlock_payload(CPUState *cpu,
 {
     GnwUnlockHandoff *handoff = data.host_ptr;
 
-    memcpy(handoff->itcm + handoff->itcm_offset, handoff->payload,
-           sizeof(handoff->payload));
-    cpu_set_pc(cpu, (handoff->itcm_offset + GNW_UNLOCK_ENTRY_OFFSET) | 1);
-    cpu_exit(cpu);
+    if (handoff->epoch == handoff->gpio->handoff_epoch) {
+        memcpy(handoff->itcm + handoff->itcm_offset, handoff->payload,
+               sizeof(handoff->payload));
+        cpu_set_pc(cpu, (handoff->itcm_offset + GNW_UNLOCK_ENTRY_OFFSET) | 1);
+        cpu_exit(cpu);
+    }
+    handoff->gpio->pending_handoffs--;
     g_free(handoff);
+}
+
+static void handoff_barrier(CPUState *cpu, run_on_cpu_data data)
+{
+    /* FIFO CPU work queue: all earlier handoffs have completed. */
+}
+
+void gnw_h7b0_gpio_snapshot_quiesce(GnwH7B0GpioState *s, bool discard)
+{
+    if (discard) {
+        s->handoff_epoch++;
+    }
+    if (s->pending_handoffs) {
+        run_on_cpu(s->cpu, handoff_barrier, RUN_ON_CPU_NULL);
+    }
 }
 
 /*
@@ -262,6 +282,9 @@ static bool gnw_h7b0_gpio_try_unlock_handoff(GnwH7B0GpioState *s,
             GnwUnlockHandoff *handoff = g_new(GnwUnlockHandoff, 1);
 
             handoff->itcm = s->itcm;
+            handoff->gpio = s;
+            handoff->epoch = s->handoff_epoch;
+            s->pending_handoffs++;
             handoff->itcm_offset = itcm_offset;
             memcpy(handoff->payload, payload, sizeof(handoff->payload));
             s->unlock_handoff_active = power_edge;
@@ -425,8 +448,6 @@ static void gnw_h7b0_gpio_input_event(DeviceState *dev, QemuConsole *src,
         rec_inited = true;
     }
 
-    static bool btn_state[GNW_BTN__COUNT] = {false};
-
     switch (evt->type) {
     case INPUT_EVENT_KIND_KEY: {
         InputKeyEvent *key = evt->u.key.data;
@@ -434,11 +455,11 @@ static void gnw_h7b0_gpio_input_event(DeviceState *dev, QemuConsole *src,
 
         for (int i = 0; i < GNW_BTN__COUNT; i++) {
             if (s->key_map[i] == qcode) {
-                if (btn_state[i] == key->down) {
+                if (s->host_buttons[i] == key->down) {
                     /* Ignore key repeat */
                     break;
                 }
-                btn_state[i] = key->down;
+                s->host_buttons[i] = key->down;
                 gnw_h7b0_gpio_set_button(s, i, key->down);
                 if (rec_file) {
                     double t = (double)qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) / 1000000000.0;
@@ -466,6 +487,9 @@ static const QemuInputHandler gnw_h7b0_gpio_input_handler = {
 static void gnw_h7b0_gpio_reset(DeviceState *dev)
 {
     GnwH7B0GpioState *s = GNW_H7B0_GPIO(dev);
+
+    s->handoff_epoch++;
+    memset(s->host_buttons, 0, sizeof(s->host_buttons));
 
     gnw_h7b0_softspi_reset(&s->softspi);
 
@@ -821,14 +845,49 @@ static void gnw_h7b0_gpio_realize(DeviceState *dev, Error **errp)
     gnw_timeline_init(s);
 }
 
+static int gpio_pre_save(void *opaque)
+{
+    GnwH7B0GpioState *s = opaque;
+
+    s->pa0_remaining_ns = timer_pending(s->pa0_release_timer) ?
+        MAX(timer_expire_time_ns(s->pa0_release_timer) -
+            qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL), 0) : -1;
+    return 0;
+}
+
+static int gpio_post_load(void *opaque, int version_id)
+{
+    GnwH7B0GpioState *s = opaque;
+
+    memset(s->host_buttons, 0, sizeof(s->host_buttons));
+    if (version_id >= 3) {
+        if (s->pa0_remaining_ns < -1) {
+            return -EINVAL;
+        }
+        timer_del(s->pa0_release_timer);
+        if (s->pa0_remaining_ns >= 0) {
+            timer_mod(s->pa0_release_timer,
+                      qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + s->pa0_remaining_ns);
+        }
+    }
+    return 0;
+}
+
 static const VMStateDescription vmstate_gnw_h7b0_gpio = {
     .name = TYPE_GNW_H7B0_GPIO,
-    .version_id = 2,
+    .version_id = 3,
     .minimum_version_id = 1,
+    .pre_save = gpio_pre_save,
+    .post_load = gpio_post_load,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT32_ARRAY(regs, GnwH7B0GpioState, GNW_H7B0_GPIO_SIZE / 4),
         VMSTATE_STRUCT(softspi, GnwH7B0GpioState, 2,
                          vmstate_gnw_h7b0_softspi, GnwH7B0SoftSpi),
+        VMSTATE_BOOL_V(power_input, GnwH7B0GpioState, 3),
+        VMSTATE_BOOL_V(usb_power, GnwH7B0GpioState, 3),
+        VMSTATE_BOOL_V(charging, GnwH7B0GpioState, 3),
+        VMSTATE_BOOL_V(unlock_handoff_active, GnwH7B0GpioState, 3),
+        VMSTATE_INT64_V(pa0_remaining_ns, GnwH7B0GpioState, 3),
         VMSTATE_END_OF_LIST()
     }
 };
