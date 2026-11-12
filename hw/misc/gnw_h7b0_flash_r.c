@@ -178,6 +178,30 @@ static void update_rdp_registers(GnwH7B0FlashRState *s, uint8_t rdp)
         ((uint32_t)rdp << RDP_SHIFT);
 }
 
+bool gnw_h7b0_flash_r_flush_rdp(GnwH7B0FlashRState *s, Error **errp)
+{
+    int fd, ret, saved_errno;
+    if (!s->rdp_image) {
+        return true;
+    }
+    fd = qemu_open_old(s->rdp_image, O_WRONLY | O_CREAT | O_TRUNC | O_BINARY, 0600);
+    if (fd < 0) {
+        error_setg_errno(errp, errno, "Could not persist restored RDP option byte");
+        return false;
+    }
+    ret = write(fd, &s->rdp_value, 1) == 1 ? qemu_fdatasync(fd) : -1;
+    saved_errno = errno;
+    if (close(fd) && !ret) {
+        ret = -1;
+        saved_errno = errno;
+    }
+    if (ret) {
+        error_setg_errno(errp, saved_errno, "Could not sync restored RDP option byte");
+        return false;
+    }
+    return true;
+}
+
 static void persist_rdp(GnwH7B0FlashRState *s)
 {
     GError *err = NULL;

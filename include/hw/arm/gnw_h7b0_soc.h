@@ -502,6 +502,7 @@ OBJECT_DECLARE_TYPE(GnwH7B0State, GnwH7B0StateClass, GNW_H7B0_SOC)
  * above.
  */
 #define RTC_BASE_ADDRESS 0x58004000
+#define GNW_UNLOCK_BASELINE_SIZE (0x30c3a8 + 1300)
 #define RTC_SIZE          0x400
 /* Per sdk/cmsis-device-h7/Include/stm32h7b0xx.h's IRQn_Type. */
 #define RTC_WKUP_IRQn 3
@@ -642,6 +643,8 @@ struct GnwH7B0State {
      * XOR-decoded cold-boot transfer into ITCM. */
     uint8_t *extflash_unlock_baseline;
     char *rdp_image;
+    /* Opt-in snapshots keep the original session decoder baseline on reopen. */
+    bool preserve_state_baseline;
     /* Start with STM32 readout protection level 1 instead of level 0. */
     bool rdp_locked;
     /* Opt-in one-instruction/one-cycle baseline; requires precise -icount. */

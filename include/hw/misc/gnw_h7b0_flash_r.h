@@ -27,6 +27,8 @@ OBJECT_DECLARE_SIMPLE_TYPE(GnwH7B0FlashRState, GNW_H7B0_FLASH_R)
 
 #define GNW_H7B0_FLASH_R_SIZE 0x1000
 
+bool gnw_h7b0_flash_r_flush_rdp(GnwH7B0FlashRState *s, Error **errp);
+
 struct GnwH7B0FlashRState {
     SysBusDevice parent_obj;
     MemoryRegion mmio;

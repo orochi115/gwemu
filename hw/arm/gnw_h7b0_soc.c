@@ -24,6 +24,7 @@
  */
 
 #include "qemu/osdep.h"
+#include "migration/vmstate.h"
 #include <glib/gstdio.h>
 #include "qapi/error.h"
 #include "qapi/visitor.h"
@@ -99,7 +100,6 @@ static void gnw_h7b0_bus_v6_tim_update(void *opaque, int instance)
 
 /* GnWManager's Zelda payload is placed at 0x30c3a8. Save that span plus the
  * 1,300-byte ITCM validation window; Mario's payload is at offset zero. */
-#define GNW_UNLOCK_BASELINE_SIZE (0x30c3a8 + 1300)
 #define GNW_STARTUP_HANDOFF_POLL_NS (10 * 1000000LL)
 #define GNW_STARTUP_HANDOFF_MAX_ATTEMPTS 500
 
@@ -539,16 +539,26 @@ static bool gnw_h7b0_init_ram_or_file(MemoryRegion *mr, Object *owner,
                         name, image_path, (uint64_t)before.st_size, size);
         }
 #ifdef CONFIG_POSIX
-        return memory_region_init_ram_from_file(mr, owner, name, size, 0,
-                                                 RAM_SHARED, image_path, 0,
-                                                 errp);
+        if (!memory_region_init_ram_from_file(mr, owner, name, size, 0,
+                                             RAM_SHARED, image_path, 0, errp)) {
+            return false;
+        }
 #elif defined(_WIN32)
-        return gnw_h7b0_init_ram_from_file_win32(mr, owner, name, size,
-                                                  image_path, errp);
+        if (!gnw_h7b0_init_ram_from_file_win32(mr, owner, name, size,
+                                            image_path, errp)) {
+            return false;
+        }
 #else
         warn_report("persistent flash-image backing isn't supported on "
                     "this host -- \"%s\" will NOT persist writes, falling "
                     "back to ephemeral RAM for %s", image_path, name);
+#endif
+#if defined(CONFIG_POSIX) || defined(_WIN32)
+        /* File/ptr RAM initializers do not register migration RAMBlocks.
+         * Register only these raw Flash mappings; normal RAM below already
+         * registers itself, and OTFDEC plaintext is a derived overlay. */
+        vmstate_register_ram(mr, DEVICE(owner));
+        return true;
 #endif
     }
     memory_region_init_ram(mr, owner, name, size, errp);
@@ -1467,7 +1477,7 @@ static void gnw_h7b0_soc_realize(DeviceState *dev_soc, Error **errp)
     s->extflash_unlock_baseline = gnw_h7b0_load_unlock_baseline(
         s->extflash_image, memory_region_get_ram_ptr(&s->extflash),
         memory_region_size(&s->extflash),
-        s->flash_r.rdp_value != 0x55, errp);
+        s->flash_r.rdp_value != 0x55 && !s->preserve_state_baseline, errp);
     if (!s->extflash_unlock_baseline) {
         return;
     }
@@ -1648,6 +1658,8 @@ static const Property gnw_h7b0_soc_properties[] = {
     DEFINE_PROP_STRING("extflash-image", GnwH7B0State, extflash_image),
     DEFINE_PROP_STRING("extflash-chip", GnwH7B0State, extflash_chip),
     DEFINE_PROP_STRING("rdp-image", GnwH7B0State, rdp_image),
+    DEFINE_PROP_BOOL("preserve-state-baseline", GnwH7B0State,
+                     preserve_state_baseline, false),
     DEFINE_PROP_BOOL("rdp-locked", GnwH7B0State, rdp_locked, false),
     DEFINE_PROP_BOOL("timing-mode", GnwH7B0State, timing_mode, false),
     DEFINE_PROP_BOOL("x-modeled-timing", GnwH7B0State,

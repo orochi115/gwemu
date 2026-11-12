@@ -38,6 +38,7 @@
 #include "hw/arm/machines-qom.h"
 #include "gnw_h7b0_desktop.h"
 #include "gnw_h7b0_power.h"
+#include "gnw_h7b0_state.h"
 #include "qapi/visitor.h"
 
 /*
@@ -79,6 +80,7 @@ struct GnwH7B0MachineState {
     int session_lock_fd;
     bool initialized;
     GnwH7B0Power power;
+    GnwH7B0Snapshot state;
 };
 
 static void gnw_h7b0_init(MachineState *machine)
@@ -109,6 +111,7 @@ static void gnw_h7b0_init(MachineState *machine)
 
     dev = qdev_new(TYPE_GNW_H7B0_SOC);
     qdev_prop_set_string(dev, "sd-wiring", s->sd_wiring);
+    qdev_prop_set_bit(dev, "preserve-state-baseline", s->state.enabled);
     object_property_add_child(OBJECT(machine), "soc", OBJECT(dev));
     qdev_connect_clock_in(dev, "sysclk", sysclk);
 
@@ -123,6 +126,7 @@ static void gnw_h7b0_init(MachineState *machine)
     }
 
     sysbus_realize_and_unref(SYS_BUS_DEVICE(dev), &error_fatal);
+    gnw_h7b0_state_init(&s->state, GNW_H7B0_SOC(dev));
     gnw_h7b0_power_start(&s->power, GNW_H7B0_SOC(dev));
 
     armv7m_load_kernel(ARM_CPU(first_cpu),
@@ -174,6 +178,52 @@ static void gnw_h7b0_set_##field(Object *obj, const char *value, Error **errp) \
 
 DESKTOP_STRING_PROPERTY(frame_endpoint, "frame-endpoint")
 DESKTOP_STRING_PROPERTY(session_lock, "session-lock")
+
+static char *gnw_h7b0_get_state_id(Object *obj, Error **errp)
+{
+    return g_strdup(GNW_H7B0_MACHINE(obj)->state.id);
+}
+
+static void gnw_h7b0_set_state_id(Object *obj, const char *value, Error **errp)
+{
+    GnwH7B0MachineState *s = GNW_H7B0_MACHINE(obj);
+    if (s->initialized) {
+        error_setg(errp, "state-id can only be set before machine initialization");
+        return;
+    }
+    g_free(s->state.id);
+    s->state.id = g_strdup(value);
+}
+
+static bool gnw_h7b0_get_instant_states(Object *obj, Error **errp)
+{
+    return GNW_H7B0_MACHINE(obj)->state.enabled;
+}
+
+static void gnw_h7b0_set_instant_states(Object *obj, bool value, Error **errp)
+{
+    GnwH7B0MachineState *s = GNW_H7B0_MACHINE(obj);
+    if (s->initialized) {
+        error_setg(errp, "instant-states can only be set before machine initialization");
+        return;
+    }
+    s->state.enabled = value;
+}
+
+static char *gnw_h7b0_get_state_support(Object *obj, Error **errp)
+{
+    return g_strdup(gnw_h7b0_state_support(&GNW_H7B0_MACHINE(obj)->state));
+}
+
+static void gnw_h7b0_save_state(Object *obj, const char *path, Error **errp)
+{
+    gnw_h7b0_state_file(&GNW_H7B0_MACHINE(obj)->state, path, false, errp);
+}
+
+static void gnw_h7b0_load_state(Object *obj, const char *path, Error **errp)
+{
+    gnw_h7b0_state_file(&GNW_H7B0_MACHINE(obj)->state, path, true, errp);
+}
 
 static char *gnw_h7b0_get_sd_wiring(Object *obj, Error **errp)
 {
@@ -298,6 +348,14 @@ static void gnw_h7b0_machine_class_init(ObjectClass *oc, const void *data)
 {
     gnw_h7b0_machine_init(MACHINE_CLASS(oc));
     MACHINE_CLASS(oc)->can_run = gnw_h7b0_can_run;
+    object_class_property_add_bool(oc, "instant-states", gnw_h7b0_get_instant_states,
+                                  gnw_h7b0_set_instant_states);
+    object_class_property_add_str(oc, "state-id", gnw_h7b0_get_state_id,
+                                 gnw_h7b0_set_state_id);
+    object_class_property_add_str(oc, "savestate-support", gnw_h7b0_get_state_support,
+                                 NULL);
+    object_class_property_add_str(oc, "save-state", NULL, gnw_h7b0_save_state);
+    object_class_property_add_str(oc, "load-state", NULL, gnw_h7b0_load_state);
     object_class_property_add_str(oc, "frame-endpoint", gnw_h7b0_get_frame_endpoint,
                                  gnw_h7b0_set_frame_endpoint);
     object_class_property_add_str(oc, "session-lock", gnw_h7b0_get_session_lock,
@@ -338,6 +396,7 @@ static void gnw_h7b0_machine_finalize(Object *obj)
     g_free(s->frame_endpoint);
     g_free(s->session_lock);
     g_free(s->sd_wiring);
+    g_free(s->state.id);
     gnw_h7b0_power_free(&s->power);
     if (s->session_lock_fd >= 0) {
         close(s->session_lock_fd);
