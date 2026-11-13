@@ -2009,13 +2009,13 @@ if not get_option('opengl').auto() or have_system or have_vhost_user_gpu
   # (pkg-config-found) dependency objects, not subproject-provided ones --
   # skip the redundant check when we just built epoxy from the wrap
   # ourselves, since it's a real, known-good build either way. EXCEPT on
-  # macOS: the wrap builds epoxy without EGL there (no EGL on Darwin, so
-  # egl_generated.h is never generated), and treating that build as
+  # macOS/Windows: the wrap builds epoxy without EGL on these hosts, so
+  # egl_generated.h is never generated, and treating that build as
   # EGL-capable set CONFIG_OPENGL and compiled ui/egl-*.c into a fatal
   # missing-header error. Darwin must always take the not-found path
   # here (see the CONFIG_GWEMU_DESKTOP_GL comment below -- the GUI's own
   # desktop-GL use doesn't need CONFIG_OPENGL).
-  if (not epoxy_from_pkgconfig and host_os != 'darwin') or \
+  if (not epoxy_from_pkgconfig and host_os not in ['darwin', 'windows']) or \
      (epoxy_from_pkgconfig and cc.has_header('epoxy/egl.h', dependencies: epoxy))
     opengl = epoxy
   elif get_option('opengl').enabled()
