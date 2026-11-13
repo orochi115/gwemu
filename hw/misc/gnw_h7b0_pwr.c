@@ -53,36 +53,57 @@ static void gnw_h7b0_pwr_reset(DeviceState *dev)
      * to match every observed real boot.
      */
     s->regs[GNW_H7B0_PWR_CPUCR_OFFSET >> 2] |= (1u << 6);
+    s->regs[GNW_H7B0_PWR_WKUPFR_OFFSET >> 2] |= 1u;
 }
 
 static uint64_t gnw_h7b0_pwr_read(void *opaque, hwaddr addr, unsigned int size)
 {
     GnwH7B0PwrState *s = GNW_H7B0_PWR(opaque);
 
-    if (addr >= GNW_H7B0_PWR_SIZE) {
+    if (addr + size > GNW_H7B0_PWR_SIZE) {
         qemu_log_mask(LOG_GUEST_ERROR, "%s: bad offset 0x%"HWADDR_PRIx"\n",
                       __func__, addr);
         return 0;
     }
-    return s->regs[addr >> 2];
+    return s->regs[addr >> 2] >> ((addr & 3) * 8);
 }
 
 static void gnw_h7b0_pwr_write(void *opaque, hwaddr addr,
                                 uint64_t val64, unsigned int size)
 {
     GnwH7B0PwrState *s = GNW_H7B0_PWR(opaque);
-    uint32_t value = val64;
+    hwaddr reg = addr & ~3ULL;
+    unsigned shift = (addr & 3) * 8;
+    uint32_t command = (uint32_t)val64 << shift;
+    uint32_t value;
 
-    if (addr >= GNW_H7B0_PWR_SIZE) {
+    if (addr + size > GNW_H7B0_PWR_SIZE || shift + size * 8 > 32) {
         qemu_log_mask(LOG_GUEST_ERROR, "%s: bad offset 0x%"HWADDR_PRIx"\n",
                       __func__, addr);
         return;
     }
 
-    uint32_t mask = get_pwr_write_mask(addr);
-    value = (s->regs[addr >> 2] & ~mask) | (value & mask);
+    uint32_t mask = get_pwr_write_mask(reg);
+    value = size == 4 ? val64 :
+        deposit32(s->regs[reg >> 2], shift, size * 8, val64);
+    value = (s->regs[reg >> 2] & ~mask) | (value & mask);
 
-    switch (addr) {
+    switch (reg) {
+    case GNW_H7B0_PWR_CPUCR_OFFSET:
+        /* STOPF/SBF are hardware status; CSSF is a self-clearing W1C
+         * pulse. Preserve status on ordinary control writes. */
+        value = (value & ~0x260u) | (s->regs[reg >> 2] & 0x60u);
+        if (command & (1u << 9)) {
+            value &= ~0x60u;
+        }
+        s->regs[reg >> 2] = value;
+        return;
+    case GNW_H7B0_PWR_WKUPCR_OFFSET:
+        s->regs[GNW_H7B0_PWR_WKUPFR_OFFSET >> 2] &= ~(command & 0x3fu);
+        s->regs[reg >> 2] = 0;
+        return;
+    case GNW_H7B0_PWR_WKUPFR_OFFSET:
+        return; /* Read-only hardware flags. */
     case GNW_H7B0_PWR_CR3:
         /*
          * Writing the supply configuration instantly "completes" it:
@@ -90,19 +111,19 @@ static void gnw_h7b0_pwr_write(void *opaque, hwaddr addr,
          * modeled). Good enough to unblock the polling loop that always
          * follows this write in ST HAL-derived supply-config code.
          */
-        s->regs[addr >> 2] = value;
+        s->regs[reg >> 2] = value;
         s->regs[GNW_H7B0_PWR_CSR1 >> 2] |= PWR_CSR1_ACTVOSRDY;
         return;
     case GNW_H7B0_PWR_SRDCR:
         /* Same idea: VOS write instantly mirrors into its own VOSRDY. */
-        s->regs[addr >> 2] = value | PWR_SRDCR_VOSRDY;
+        s->regs[reg >> 2] = value | PWR_SRDCR_VOSRDY;
         return;
     default:
         qemu_log_mask(LOG_UNIMP,
                       "%s: offset 0x%"HWADDR_PRIx" is a plain read/write "
                       "shadow, no real power-domain behavior modeled\n",
                       __func__, addr);
-        s->regs[addr >> 2] = value;
+        s->regs[reg >> 2] = value;
     }
 }
 

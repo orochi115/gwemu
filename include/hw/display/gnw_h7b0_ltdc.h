@@ -8,13 +8,13 @@
  * Mario/Zelda's GAME/PAUSE overlay menus fully invisible even once
  * their pixel data was being decoded correctly), with blending,
  * color-keying, and independent per-layer CLUTs all modeled (see
- * gnw_h7b0_ltdc_capture_rows()). RGB565, ARGB8888/1555/4444, L8
+ * gnw_h7b0_ltdc_capture_rows()). RGB565/888, ARGB8888/1555/4444, AL88, L8
  * (flat 256-entry CLUT-indexed), and AL44 (4-bit alpha applied
  * directly + 4-bit luminance indexing a 16-entry CLUT sub-palette at
  * n*17 -- NOT flat-256-indexed like L8; used by Mario/Zelda's stock
  * firmware for anti-aliased overlay text, e.g. the GAME/PAUSE menus)
- * are all drawn (other LxPFCR values log unimplemented and draw
- * nothing). QEMU's own display-refresh timer drives redraws, not a
+ * are drawn on both layers. PA4 digital/DAC1 output controls the
+ * panel backlight at scanout publication. QEMU's own display-refresh timer drives redraws, not a
  * modeled per-pixel/per-line VSYNC scan.
  *
  * Line interrupt IS modeled, though, via a QEMU timer now paced by the
@@ -85,6 +85,8 @@
 #include "qemu/thread.h"
 #include "qom/object.h"
 #include "hw/misc/gnw_h7b0_rcc.h"
+#include "hw/misc/gnw_h7b0_gpio.h"
+#include "hw/misc/gnw_h7b0_dac.h"
 
 #define TYPE_GNW_H7B0_LTDC "gnw-h7b0-ltdc"
 OBJECT_DECLARE_SIMPLE_TYPE(GnwH7B0LtdcState, GNW_H7B0_LTDC)
@@ -300,6 +302,9 @@ struct GnwH7B0LtdcState {
      * fallback. May be NULL (e.g. standalone instantiation) -- callers
      * must check before use. */
     GnwH7B0RccState *rcc;
+    GnwH7B0GpioState *backlight_gpio;
+    GnwH7B0DacState *backlight_dac;
+    uint32_t last_backlight;
 
     /*
      * Real "active" copies of the Layer1 and Layer2 registers that actually

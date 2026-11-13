@@ -1,24 +1,4 @@
-/*
- * Auto-generated stub for DAC, extended with real DHR->DOR transfer.
- *
- * Was a plain read/write shadow with no side effects at all -- fine for
- * firmware that only pokes DAC registers without ever reading back the
- * output, but stm32h7b0-diag's dac1_output_value/dac2_output_value cases
- * (this firmware's real LCD-backlight control path, MX_DAC1_Init()/
- * MX_DAC2_Init() in main.c, DAC_Trigger = NONE) write a known code via
- * HAL_DAC_SetValue() (-> DHR12Rx) and read it back via HAL_DAC_GetValue()
- * (-> DORx) to verify the digital output pipeline. Per RM0455: with
- * TENx=0 (untriggered, this firmware's actual config), the DHRx->DORx
- * transfer happens automatically ~1 APB1 clock after the DHRx write, no
- * software trigger needed. With no such transfer modeled at all, DORx
- * stayed permanently 0 regardless of what firmware wrote to DHRx.
- *
- * Only the untriggered (TENx=0) auto-transfer is modeled, on writes to
- * each channel's single-channel DHR registers (DHR12Rx/DHR12Lx/DHR8Rx --
- * the only ones any known firmware here uses; DHR12RD/DHR12LD/DHR8RD
- * dual-channel registers are not handled). Software-triggered transfers
- * (TENx=1 + SWTRGR) are not modeled -- no known firmware here uses them.
- */
+/* STM32H7B0 DAC holding-register aliases and output transfers. */
 #include "qemu/osdep.h"
 #include "qemu/log.h"
 #include "migration/vmstate.h"
@@ -27,63 +7,40 @@
 
 #define DAC_CR_EN1  (1U << 0)
 #define DAC_CR_TEN1 (1U << 1)
-#define DAC_CR_EN2  (1U << 16)
-#define DAC_CR_TEN2 (1U << 17)
 
-static void gnw_h7b0_dac_maybe_transfer(GnwH7B0DacState *s, hwaddr addr)
+static void gnw_h7b0_dac_transfer(GnwH7B0DacState *s, int channel,
+                                  bool software)
 {
-    uint32_t cr = s->regs[GNW_H7B0_DAC1_CR_OFFSET >> 2];
-    uint32_t val;
-    hwaddr dor_off;
+    uint32_t control = s->regs[0] >> (16 * channel);
+    bool triggered = control & DAC_CR_TEN1;
 
-    switch (addr) {
-    case GNW_H7B0_DAC1_DHR12R1_OFFSET:
-        val = s->regs[addr >> 2] & 0xfffU;
-        dor_off = GNW_H7B0_DAC1_DOR1_OFFSET;
-        if (cr & DAC_CR_TEN1) {
-            return;
-        }
-        break;
-    case GNW_H7B0_DAC1_DHR12L1_OFFSET:
-        val = (s->regs[addr >> 2] >> 4) & 0xfffU;
-        dor_off = GNW_H7B0_DAC1_DOR1_OFFSET;
-        if (cr & DAC_CR_TEN1) {
-            return;
-        }
-        break;
-    case GNW_H7B0_DAC1_DHR8R1_OFFSET:
-        val = (s->regs[addr >> 2] & 0xffU) << 4;
-        dor_off = GNW_H7B0_DAC1_DOR1_OFFSET;
-        if (cr & DAC_CR_TEN1) {
-            return;
-        }
-        break;
-    case GNW_H7B0_DAC1_DHR12R2_OFFSET:
-        val = s->regs[addr >> 2] & 0xfffU;
-        dor_off = GNW_H7B0_DAC1_DOR2_OFFSET;
-        if (cr & DAC_CR_TEN2) {
-            return;
-        }
-        break;
-    case GNW_H7B0_DAC1_DHR12L2_OFFSET:
-        val = (s->regs[addr >> 2] >> 4) & 0xfffU;
-        dor_off = GNW_H7B0_DAC1_DOR2_OFFSET;
-        if (cr & DAC_CR_TEN2) {
-            return;
-        }
-        break;
-    case GNW_H7B0_DAC1_DHR8R2_OFFSET:
-        val = (s->regs[addr >> 2] & 0xffU) << 4;
-        dor_off = GNW_H7B0_DAC1_DOR2_OFFSET;
-        if (cr & DAC_CR_TEN2) {
-            return;
-        }
-        break;
-    default:
+    /* TSEL=0 selects software. Disabled channels retain their DOR. */
+    if (!(control & DAC_CR_EN1) ||
+        (software ? !triggered || (control & 0x3c) : triggered)) {
         return;
     }
+    s->regs[(GNW_H7B0_DAC1_DOR1_OFFSET >> 2) + channel] =
+        s->regs[(GNW_H7B0_DAC1_DHR12R1_OFFSET + channel * 12) >> 2];
+}
 
-    s->regs[dor_off >> 2] = val;
+static void gnw_h7b0_dac_set_holding(GnwH7B0DacState *s, int channel,
+                                     uint32_t value)
+{
+    hwaddr base = GNW_H7B0_DAC1_DHR12R1_OFFSET + channel * 12;
+    uint32_t shift = channel * 16;
+    uint32_t shift8 = channel * 8;
+
+    value &= 0xfff;
+    s->regs[base >> 2] = value;
+    s->regs[(base + 4) >> 2] = value << 4;
+    s->regs[(base + 8) >> 2] = value >> 4;
+    s->regs[GNW_H7B0_DAC1_DHR12RD_OFFSET >> 2] = deposit32(
+        s->regs[GNW_H7B0_DAC1_DHR12RD_OFFSET >> 2], shift, 12, value);
+    s->regs[GNW_H7B0_DAC1_DHR12LD_OFFSET >> 2] = deposit32(
+        s->regs[GNW_H7B0_DAC1_DHR12LD_OFFSET >> 2], shift + 4, 12, value);
+    s->regs[GNW_H7B0_DAC1_DHR8RD_OFFSET >> 2] = deposit32(
+        s->regs[GNW_H7B0_DAC1_DHR8RD_OFFSET >> 2], shift8, 8, value >> 4);
+    gnw_h7b0_dac_transfer(s, channel, false);
 }
 
 static void gnw_h7b0_dac_reset(DeviceState *dev)
@@ -101,7 +58,7 @@ static uint64_t gnw_h7b0_dac_read(void *opaque, hwaddr addr, unsigned int size)
         qemu_log_mask(LOG_GUEST_ERROR, "%s: bad offset 0x%"HWADDR_PRIx"\n", __func__, addr);
         return 0;
     }
-    return s->regs[addr >> 2];
+    return s->regs[addr >> 2] >> ((addr & 3) * 8);
 }
 
 static void gnw_h7b0_dac_write(void *opaque, hwaddr addr, uint64_t val64, unsigned int size)
@@ -111,9 +68,40 @@ static void gnw_h7b0_dac_write(void *opaque, hwaddr addr, uint64_t val64, unsign
         qemu_log_mask(LOG_GUEST_ERROR, "%s: bad offset 0x%"HWADDR_PRIx"\n", __func__, addr);
         return;
     }
-    uint32_t mask = get_dac_write_mask(addr);
-    s->regs[addr >> 2] = (s->regs[addr >> 2] & ~mask) | ((uint32_t)val64 & mask);
-    gnw_h7b0_dac_maybe_transfer(s, addr);
+    unsigned int lane = (addr & 3) * 8;
+    uint32_t value, mask;
+
+    addr &= ~3ULL;
+    value = deposit32(s->regs[addr >> 2], lane, size * 8, val64);
+    mask = get_dac_write_mask(addr);
+    s->regs[addr >> 2] = (s->regs[addr >> 2] & ~mask) | (value & mask);
+    value = s->regs[addr >> 2];
+    if (addr == GNW_H7B0_DAC1_CR_OFFSET) {
+        gnw_h7b0_dac_transfer(s, 0, false);
+        gnw_h7b0_dac_transfer(s, 1, false);
+    } else if (addr == GNW_H7B0_DAC1_SWTRGR_OFFSET) {
+        for (int channel = 0; channel < 2; channel++) {
+            if (value & (1u << channel)) {
+                gnw_h7b0_dac_transfer(s, channel, true);
+            }
+        }
+        s->regs[addr >> 2] = 0;
+    } else if (addr >= GNW_H7B0_DAC1_DHR12R1_OFFSET &&
+               addr <= GNW_H7B0_DAC1_DHR8R2_OFFSET) {
+        int channel = (addr - GNW_H7B0_DAC1_DHR12R1_OFFSET) / 12;
+        int format = (addr - GNW_H7B0_DAC1_DHR12R1_OFFSET) % 12;
+        gnw_h7b0_dac_set_holding(s, channel,
+            format == 4 ? value >> 4 : format == 8 ? value << 4 : value);
+    } else if (addr >= GNW_H7B0_DAC1_DHR12RD_OFFSET &&
+               addr <= GNW_H7B0_DAC1_DHR8RD_OFFSET) {
+        for (int channel = 0; channel < 2; channel++) {
+            uint32_t code = value >> (channel * (addr ==
+                GNW_H7B0_DAC1_DHR8RD_OFFSET ? 8 : 16));
+            gnw_h7b0_dac_set_holding(s, channel,
+                addr == GNW_H7B0_DAC1_DHR12LD_OFFSET ? code >> 4 :
+                addr == GNW_H7B0_DAC1_DHR8RD_OFFSET ? (code & 0xff) << 4 : code);
+        }
+    }
 }
 
 static const MemoryRegionOps gnw_h7b0_dac_ops = {

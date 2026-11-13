@@ -1,3 +1,10 @@
+2026-11-13  gnw: close functional device gaps from the legacy comparison
+            Enforce NOR write enable, one-way page programming and page wrap;
+            model DAC channel enable/software trigger/dual holding aliases;
+            apply PA4/DAC1 brightness to scanout; decode all eight LTDC
+            formats on both layers; clear PWR status flags with self-clearing
+            commands; restrict CNT/ARR to each timer's hardware width.
+
 2026-10-15  ospi: select supported NOR chips up to 256 MiB
             The Flash tab and profile wizard now select a chip from the
             JEDEC catalog used by retro-go-sd. The selected capacity sets

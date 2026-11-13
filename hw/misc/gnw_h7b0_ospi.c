@@ -452,9 +452,10 @@ static bool ospi_expected_adsize(GnwH7B0OspiState *s, uint8_t instr,
 static void ospi_backing_erase(GnwH7B0OspiState *s, uint32_t addr,
                                 uint64_t size)
 {
-    if (!s->backing || addr >= s->flash_size) {
+    if (!s->wel || !s->backing || !size || addr >= s->flash_size) {
         return;
     }
+    addr &= ~(size - 1);
     if (size > s->flash_size - addr) {
         size = s->flash_size - addr;
     }
@@ -470,6 +471,10 @@ static void ospi_backing_erase(GnwH7B0OspiState *s, uint32_t addr,
  */
 static void ospi_cmd_triggered(GnwH7B0OspiState *s)
 {
+    /* Program consumes WEL only after its data phase is delivered. */
+    if (s->pending_instr == ospi_chip_program_opcode(s)) {
+        return;
+    }
     switch (s->pending_instr) {
     case OSPI_CMD_WREN:
         s->wel = true;
@@ -482,6 +487,9 @@ static void ospi_cmd_triggered(GnwH7B0OspiState *s)
     case OSPI_CMD_SFDP:
     case OSPI_CMD_RSTEN:
     case OSPI_CMD_RST:
+    case 0x03: case 0x0B: case 0x3B: case 0x6B: case 0xBB:
+    case 0x13: case 0x0C: case 0x3C: case 0x6C: case 0xBC:
+    case 0xEB: case 0xEC:
         return;
     case OSPI_CMD_CE:
         ospi_backing_erase(s, 0, s->flash_size);
@@ -792,8 +800,6 @@ static void ospi_timing_log_fallback(GnwH7B0OspiState *s)
 
 static void ospi_timing_commit_transaction(GnwH7B0OspiState *s)
 {
-    uint64_t size;
-
     switch (s->active_instr) {
     case OSPI_CMD_WREN:
         s->wel = true;
@@ -823,12 +829,14 @@ static void ospi_timing_commit_transaction(GnwH7B0OspiState *s)
         s->wel = false;
         break;
     case OSPI_CMD_PP:
-        size = MIN((uint64_t)s->delivered_program_len,
-                   s->flash_size > s->active_addr ?
-                       s->flash_size - s->active_addr : 0);
-        if (s->backing && size) {
-            memcpy(s->backing + s->active_addr,
-                   s->delivered_program, size);
+        if (s->wel && s->backing) {
+            for (unsigned i = 0; i < s->delivered_program_len; i++) {
+                uint64_t off = (s->active_addr & ~0xffu) |
+                               ((s->active_addr + i) & 0xffu);
+                if (off < s->flash_size) {
+                    s->backing[off] &= s->delivered_program[i];
+                }
+            }
         }
         s->wel = false;
         break;
@@ -1336,6 +1344,13 @@ static void gnw_h7b0_ospi_write(void *opaque, hwaddr addr,
             }
         }
 
+        /* Addressed commands do not start at IR: WREN must survive
+         * until AR completes the command, especially for sector erase. */
+        if (addr == GNW_H7B0_OSPI_IR &&
+            (s->regs[GNW_H7B0_OSPI_CCR >> 2] & OSPI_CCR_ADMODE_MASK)) {
+            return;
+        }
+
         if (addr == GNW_H7B0_OSPI_AR) {
             /* Sector/block erase has an address phase but no data phase. */
             uint64_t erase_size = ospi_chip_erase_size(s, s->pending_instr);
@@ -1389,12 +1404,16 @@ static void gnw_h7b0_ospi_write(void *opaque, hwaddr addr,
             uint64_t length = (uint64_t)s->regs[GNW_H7B0_OSPI_DLR >> 2] + 1;
 
             for (unsigned i = 0; i < size && s->dr_pos < length; i++) {
-                uint64_t off = s->pending_addr + s->dr_pos;
+                uint64_t off = (s->pending_addr & ~0xffu) |
+                               ((s->pending_addr + s->dr_pos) & 0xffu);
 
-                if (off < s->flash_size) {
-                    s->backing[off] = val64 >> (i * 8);
+                if (s->wel && off < s->flash_size) {
+                    s->backing[off] &= val64 >> (i * 8);
                 }
                 s->dr_pos++;
+            }
+            if (s->dr_pos == length) {
+                s->wel = false;
             }
             return;
         }

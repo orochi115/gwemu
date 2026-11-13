@@ -61,13 +61,20 @@ static QEMUTimer *gnw_h7b0_tim2_count_timer(GnwH7B0Tim2State *s, int idx)
 
 static uint32_t gnw_h7b0_tim2_counter_mask(int idx)
 {
-    return idx < GNW_H7B0_TIM2_LEGACY_INSTANCE_COUNT ? UINT32_MAX : 0xffffu;
+    /* Only TIM2 and TIM5 have 32-bit counters (RM0455). */
+    return idx == 0 || idx == 3 ? UINT32_MAX : 0xffffu;
 }
 
 static uint32_t gnw_h7b0_tim2_write_mask(int idx, uint32_t offset)
 {
     if (idx < GNW_H7B0_TIM2_LEGACY_INSTANCE_COUNT) {
-        return get_tim2_write_mask(offset);
+        uint32_t mask = get_tim2_write_mask(offset);
+
+        if (offset == GNW_H7B0_TIM2_CNT_OFFSET ||
+            offset == GNW_H7B0_TIM2_ARR_OFFSET) {
+            mask &= gnw_h7b0_tim2_counter_mask(idx);
+        }
+        return mask;
     }
 
     /* TIM12/13/14 only expose the base timer controls modeled below. */

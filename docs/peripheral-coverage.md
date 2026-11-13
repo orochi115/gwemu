@@ -15,7 +15,7 @@ need scripted upkeep.
 |---|---|---|
 | RCC | Real | Full clock tree: HSI/HSE/PLL1-3, SYSCLK/HCLK/pixel-clock propagation, dynamic CPU-overclock support. AHB1RSTR/APB2RSTR writes really reset the registered devices on a 0->1 edge (`HAL_DeInit()` depends on it); APB3RSTR — and so LTDCRST — is deliberately still inert, see `docs/STATUS.md`. |
 | NVIC | Real | Standard ARMv7-M NVIC, with two deliberate fork-local changes. First, an `MPU_RNR`/`MPU_RBAR` write naming a region the CPU does not implement (architecturally `UNPREDICTABLE`) now also suppresses the *following* `MPU_RASR` write, which would otherwise take its region number from the stale `MPU_RNR` and reprogram an unrelated region — see `tests/qtest/armv7m-mpu-test.c`. Second, v7M Lockup no longer `cpu_abort()`s the process. A guest with no valid vector table (blank internal flash, a supported state — it is what real hardware looks like before flashing, and how gnwmanager/GDB flashing works) clears the stuck exception state, halts, and re-resets every 250ms. The loop stands down under `RUN_STATE_DEBUG` so a debugger can load and run code from RAM. A machine that appears to reset in a loop on a blank bank1 is behaving correctly, not failing. |
-| LTDC | Real | Per-layer compositing, all pixel formats in use, color key, blend, dithering, CLUTs, real reload/vblank timing. A frame is published once per guest frame: firmware's `SRCR.IMR` reload followed by a `SRCR.VBR` reload that latches nothing new is one frame, not two. |
+| LTDC | Real | Per-layer compositing, all eight PFCR formats on both layers, PA4/DAC backlight, color key, blend, dithering, CLUTs, real reload/vblank timing. A frame is published once per guest frame: firmware's `SRCR.IMR` reload followed by a `SRCR.VBR` reload that latches nothing new is one frame, not two. |
 | DMA2D | Real | Per-pixel fetch for every format in use, blend/fixed-color modes. |
 | JPEG | Real | Polled output-register pipeline, correct chroma subsampling (decode via `stb_image.h`). |
 | CRYP | Real | AES ECB/CBC/CTR/GCM/CCM. |
@@ -27,20 +27,20 @@ need scripted upkeep.
 | DMA | Partial | Real per-stream transfer-completion (extended from a plain register shadow for retro-go's audio DMA path). |
 | MDMA | Partial | Real SW-triggered memory-to-memory transfer completion (was a full unimplemented-device stub). |
 | TIM1 | Partial | Real counter/UIF for `CR1.CEN` (was a plain register shadow). |
-| TIM2 | Partial | Block model with real counting/UIF (covers TIM2-TIM14's shared register layout). |
+| TIM2 | Partial | Block model with real counting/UIF and per-instance 16/32-bit CNT/ARR (TIM2/5 are 32-bit). |
 | LPTIM1 | Partial | Free-running-counter model, mirrors TIM2's `CR1.CEN`/`EGR.UG` pattern. |
-| DAC | Partial | Real DHR→DOR transfer (LCD-backlight control path). |
+| DAC | Partial | Enabled-channel DHR aliases/dual writes, untriggered and software-triggered DOR transfer (LCD-backlight control path); external trigger timing is not modeled. |
 | RNG | Partial | Real `RNG_SR.DRDY` completion (was a full unimplemented-device stub). |
 | CRC | Partial | Real CRC-32 unit, correct reset value. |
 | DWT | Partial | Real `CYCCNT` only. |
 | RTC | Partial | Real IRQ wiring on `MISR & (ALRAF|ALRBF)`, backup-domain registers correctly survive CPU-only reset. TR/DR/SSR are a real virtual-clock calendar with the hardware shadow-register lock; alarms/wakeup-timer are instant-fire approximations. |
 | FLASH_R | Partial | Real sector-erase side effect against actual flash memory; `OPTSR_CUR.RDP` seeded to real factory default. |
-| OSPI (x2) | Partial | Real command decoding, auto-polling, IRQ lines, and a selectable JEDEC NOR catalog with capacity-dependent SFDP density, read/program/erase opcodes, and Winbond/Spansion status handling. The SoC maps both controllers to the selected chip capacity (up to 256 MiB). |
+| OSPI (x2) | Partial | Real command decoding, NOR WEL/bitwise programming/page wrap/erase gating, auto-polling, IRQ lines, and a selectable JEDEC NOR catalog with capacity-dependent SFDP density, read/program/erase opcodes, and Winbond/Spansion status handling. The SoC maps both controllers to the selected chip capacity (up to 256 MiB). |
 | SPI | Partial | Real `TXP`/`RXP`/`EOT` status-flag behavior and a real SSI byte exchange with the virtual SD card. SPI1 additionally models the DMA request path (DMAMUX requests 37/38 into DMA1, `CFG1.TXDMAEN`/`RXDMAEN`, `CR1.CSTART` gating, EOT interrupt on NVIC 35) so retro-go-sd's `HAL_SPI_TransmitReceive_DMA()` SD block reads complete instead of timing out. SPI2 (LCD) is polled only, no IRQ, no DMA. |
 | LPUART1 | Stub | Register-array shadow, correct reset values, no real UART behavior. |
 | USART1 | Partial | Transmit only: ISR reports the transmitter always ready, TDR writes go to serial port 0. No RX. Homebrew printf console. |
 | ADC (1/2) | Stub+ | Register shadow, but decodes `SQR1.SQ1` and returns per-channel values (incl. VREFINT); DMA completion notify wired. |
-| PWR | Stub+ | Register shadow, but `CPUCR.SBF` correctly forced at reset (real boot-critical behavior, see the file's own comment for why). |
+| PWR | Stub+ | Register shadow with boot SBF/WKUPF1, CSSF status clearing and self-clearing WKUPCR W1C. Full MCU Standby/Stop domain timing remains unmodeled. |
 | TAMP | Stub | Register-array shadow; backup registers correctly excluded from CPU-only reset (real hardware behavior). |
 | WWDG, IWDG | Stub | Register-array shadow, correct reset values. |
 | SYSCFG, OCTOSPIM, DBGMCU, CRS, FMC | Stub | Register-array shadow, correct reset values; unused for real side effects on this board (see `docs/peripheral-coverage.md`'s "not needed" note below). |

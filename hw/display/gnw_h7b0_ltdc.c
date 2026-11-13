@@ -62,6 +62,7 @@ static bool gnw_timer_late_enabled(void)
 }
 
 static int gnw_h7b0_ltdc_capture_setup(GnwH7B0LtdcState *s);
+static int gnw_h7b0_ltdc_l2_bpp(uint32_t pfcr);
 static void gnw_h7b0_ltdc_composite_from_job(GnwH7B0LtdcState *s,
                                               GnwH7B0LtdcCaptureJob *job,
                                               uint32_t *out);
@@ -142,7 +143,7 @@ static bool gnw_h7b0_ltdc_capture_if_enabled(GnwH7B0LtdcState *s)
     if (s->job_busy) {
         uint32_t pfcr = s->active_l1pfcr & LTDC_LxPFCR_PF_MASK;
         int src_width = gnw_h7b0_ltdc_layer_stride_bytes(s->active_l1cfblr);
-        int cols = src_width / (pfcr == LTDC_PF_L8 ? 1 : 2);
+        int cols = src_width / gnw_h7b0_ltdc_l2_bpp(pfcr);
         int brows = (int)(s->active_l1cfblnr & 0x7FFU);
         qemu_mutex_unlock(&s->job_lock);
 
@@ -155,7 +156,6 @@ static bool gnw_h7b0_ltdc_capture_if_enabled(GnwH7B0LtdcState *s)
          * defer-and-retry behavior (rare: screen/mode transitions).
          */
         if (cols != s->shadow_width || brows != s->shadow_height ||
-            (pfcr != LTDC_PF_RGB565 && pfcr != LTDC_PF_L8) ||
             !(s->active_l1cr & LTDC_LxCR_LEN)) {
             return false;
         }
@@ -775,19 +775,13 @@ static int gnw_h7b0_ltdc_layer_stride_bytes(uint32_t cfblr)
     return stride;
 }
 
-/*
- * Bytes-per-pixel for Layer2's supported formats -- mirrors the l2_bpp
- * switch inside gnw_h7b0_ltdc_capture_rows() (kept as a separate literal
- * copy there rather than refactored to share this helper, to avoid
- * touching that already-working per-pixel hot path while adding this
- * dirty-tracking feature). Returns 0 for an unsupported/disabled format,
- * same convention as capture_rows()'s l2_bpp.
- */
+/* Bytes per pixel for the eight legal PFCR formats on either layer. */
 static int gnw_h7b0_ltdc_l2_bpp(uint32_t l2_pfcr)
 {
     switch (l2_pfcr) {
     case 0: return 4; /* ARGB8888 */
-    case 2: case 3: case 4: return 2; /* RGB565/ARGB1555/ARGB4444 */
+    case 1: return 3; /* RGB888 */
+    case 2: case 3: case 4: case 7: return 2; /* RGB565/ARGB1555/ARGB4444/AL88 */
     case 5: return 1; /* L8 */
     case 6: return 1; /* AL44 */
     default: return 0;
@@ -972,7 +966,6 @@ static bool gnw_h7b0_ltdc_fb_range_dirty(MemoryRegionSection *section,
 static bool gnw_h7b0_ltdc_fb_dirty_check_and_clear(GnwH7B0LtdcState *s)
 {
     uint32_t pfcr = s->active_l1pfcr & LTDC_LxPFCR_PF_MASK;
-    bool l1_l8 = (pfcr == LTDC_PF_L8);
     int cols = s->shadow_width;
     int rows = s->shadow_height;
     bool l1_dirty, l2_dirty = false;
@@ -984,7 +977,7 @@ static bool gnw_h7b0_ltdc_fb_dirty_check_and_clear(GnwH7B0LtdcState *s)
         return true;
     }
 
-    l1_len = (hwaddr)(cols * (l1_l8 ? 1 : 2)) * rows;
+    l1_len = (hwaddr)(cols * gnw_h7b0_ltdc_l2_bpp(pfcr)) * rows;
     gnw_h7b0_ltdc_fb_track_range(&s->fb_l1_section, &s->fb_l1_track_base,
                                   &s->fb_l1_track_len, s->active_l1cfbar,
                                   l1_len);
@@ -1041,6 +1034,8 @@ static uint32_t gnw_h7b0_ltdc_read_pixel_buf(const uint8_t *buf, uint32_t pfcr)
     switch (pfcr) {
     case 0: /* ARGB8888 */
         return ldl_le_p(buf);
+    case 1: /* RGB888, BGR byte order in memory. */
+        return 0xff000000u | (buf[2] << 16) | (buf[1] << 8) | buf[0];
     case 2: /* RGB565 */
         return gnw_h7b0_ltdc_rgb565_to_pixel32(lduw_le_p(buf));
     case 3: /* ARGB1555 */
@@ -1090,16 +1085,6 @@ static int gnw_h7b0_ltdc_capture_setup(GnwH7B0LtdcState *s)
     }
 
     pfcr = s->active_l1pfcr & LTDC_LxPFCR_PF_MASK;
-    if (pfcr != LTDC_PF_RGB565 && pfcr != LTDC_PF_L8) {
-        if (!s->pf_warned) {
-            qemu_log_mask(LOG_UNIMP,
-                          "gnw_h7b0_ltdc: only RGB565/L8 are supported for Layer 1 PFCR "
-                          "requested format %u -- nothing will be shown\n",
-                          pfcr);
-            s->pf_warned = true;
-        }
-        return 0;
-    }
 
     if (!(s->active_l1cr & LTDC_LxCR_LEN)) {
         return 0; /* Layer 1 must be enabled for base frame */
@@ -1109,7 +1094,7 @@ static int gnw_h7b0_ltdc_capture_setup(GnwH7B0LtdcState *s)
     cfblnr = s->active_l1cfblnr & 0x7FFU;
 
     src_width = gnw_h7b0_ltdc_layer_stride_bytes(cfblr);
-    cols = src_width / (pfcr == LTDC_PF_L8 ? 1 : 2);
+    cols = src_width / gnw_h7b0_ltdc_l2_bpp(pfcr);
     rows = (int)cfblnr;
 
     if (cols <= 0 || rows <= 0) {
@@ -1450,8 +1435,7 @@ static void gnw_h7b0_ltdc_snapshot_into(GnwH7B0LtdcState *s,
 {
     int cols = s->shadow_width;
     uint32_t pfcr = s->active_l1pfcr & LTDC_LxPFCR_PF_MASK;
-    bool l1_l8 = (pfcr == LTDC_PF_L8);
-    int l1_src_width = cols * (l1_l8 ? 1 : 2);
+    int l1_src_width = cols * gnw_h7b0_ltdc_l2_bpp(pfcr);
 
     bool l2_en = s->active_l2cr & LTDC_LxCR_LEN;
     uint32_t l2_pfcr = s->active_l2pfcr & LTDC_LxPFCR_PF_MASK;
@@ -1473,13 +1457,7 @@ static void gnw_h7b0_ltdc_snapshot_into(GnwH7B0LtdcState *s,
      * state.
      */
     if (l2_en && l2_src_width > 0) {
-        switch (l2_pfcr) {
-        case 0: l2_bpp = 4; break;
-        case 2: case 3: case 4: l2_bpp = 2; break;
-        case 5: l2_bpp = 1; break; /* L8 */
-        case 6: l2_bpp = 1; break; /* AL44 */
-        default: l2_bpp = 0; break;
-        }
+        l2_bpp = gnw_h7b0_ltdc_l2_bpp(l2_pfcr);
     }
     /*
      * Layer2's own column count, derived from its own stride/bpp -- NOT
@@ -1703,7 +1681,7 @@ static void gnw_h7b0_ltdc_composite_from_job_inner(GnwH7B0LtdcState *s,
      * layer. CACR == 255 is still required, and !l1_colken still is too
      * (a color-key hit forces pa to 0, breaking the collapse above).
      */
-    bool l1_fast_eligible = allow_fast && !l1_l8 && !l1_colken &&
+    bool l1_fast_eligible = allow_fast && pfcr == LTDC_PF_RGB565 && !l1_colken &&
         l1_cacr == 255 &&
         !dither_en && cols > 0 && l1_x_in[0] && l1_x_in[cols - 1];
 
@@ -1778,6 +1756,10 @@ static void gnw_h7b0_ltdc_composite_from_job_inner(GnwH7B0LtdcState *s,
 
                     if (l2_l8) {
                         l2_raw = job->clut2[l2_linebuf[x]];
+                    } else if (l2_pfcr == 7) {
+                        const uint8_t *pixel = l2_linebuf + x * 2;
+                        l2_raw = (pixel[1] << 24) |
+                            (job->clut2[pixel[0]] & 0xffffff);
                     } else if (l2_al44) {
                         uint8_t raw = l2_linebuf[x];
                         unsigned int a8 = ((raw >> 4) & 0xF) * 0x11U;
@@ -1801,9 +1783,18 @@ static void gnw_h7b0_ltdc_composite_from_job_inner(GnwH7B0LtdcState *s,
         for (int x = 0; x < cols; x++) {
             int abs_x = ahbp + x + 1;
             bool l1_in = l1_row_in && l1_x_in[x];
-            uint32_t l1_raw = l1_l8 ? job->clut[linebuf[x]]
-                                    : gnw_h7b0_ltdc_rgb565_to_pixel32(
-                                          lduw_le_p(linebuf + x * 2));
+            uint32_t l1_raw;
+            const uint8_t *pixel = linebuf + x * gnw_h7b0_ltdc_l2_bpp(pfcr);
+            if (l1_l8) {
+                l1_raw = job->clut[*pixel];
+            } else if (pfcr == LTDC_PF_AL44) {
+                l1_raw = ((*pixel >> 4) * 0x11u << 24) |
+                    (job->clut[(*pixel & 0xf) * 0x11u] & 0xffffff);
+            } else if (pfcr == 7) { /* AL88 */
+                l1_raw = (pixel[1] << 24) | (job->clut[pixel[0]] & 0xffffff);
+            } else {
+                l1_raw = gnw_h7b0_ltdc_read_pixel_buf(pixel, pfcr);
+            }
 
             unsigned int l1_alpha;
             uint32_t l1_resolved = gnw_h7b0_ltdc_resolve_layer(
@@ -1820,6 +1811,10 @@ static void gnw_h7b0_ltdc_composite_from_job_inner(GnwH7B0LtdcState *s,
                 if (l2_l8) {
                     uint8_t idx = l2_linebuf[x];
                     l2_raw = job->clut2[idx];
+                } else if (l2_pfcr == 7) {
+                    const uint8_t *pixel = l2_linebuf + x * 2;
+                    l2_raw = (pixel[1] << 24) |
+                        (job->clut2[pixel[0]] & 0xffffff);
                 } else if (l2_al44) {
                     uint8_t raw = l2_linebuf[x];
                     unsigned int a4 = (raw >> 4) & 0xF;
@@ -1956,6 +1951,26 @@ static void gnw_h7b0_ltdc_wait_compositor_idle(GnwH7B0LtdcState *s)
     qemu_mutex_unlock(&s->job_lock);
 }
 
+static uint32_t gnw_h7b0_ltdc_backlight(GnwH7B0LtdcState *s)
+{
+    if (!s->backlight_gpio || !s->backlight_dac) {
+        return 4095;
+    }
+    uint32_t mode = (s->backlight_gpio->regs[0] >> 8) & 3;
+    if (mode == 1) {
+        return s->backlight_gpio->regs[0x14 >> 2] & (1 << 4) ? 4095 : 0;
+    }
+    return mode == 3 ? s->backlight_dac->regs[0x2c >> 2] & 0xfff : 0;
+}
+
+static uint32_t gnw_h7b0_ltdc_dim(uint32_t pixel, uint32_t brightness)
+{
+    uint32_t r = ((pixel >> 16) & 255) * brightness / 4095;
+    uint32_t g = ((pixel >> 8) & 255) * brightness / 4095;
+    uint32_t b = (pixel & 255) * brightness / 4095;
+    return (pixel & 0xff000000u) | (r << 16) | (g << 8) | b;
+}
+
 static void gnw_h7b0_ltdc_update_display(void *opaque)
 {
     GnwH7B0LtdcState *s = GNW_H7B0_LTDC(opaque);
@@ -1963,6 +1978,12 @@ static void gnw_h7b0_ltdc_update_display(void *opaque)
     uint32_t *buf;
     int width, height;
     bool dirty;
+    uint32_t brightness = gnw_h7b0_ltdc_backlight(s);
+
+    if (brightness != s->last_backlight) {
+        s->invalidate = 1;
+        s->last_backlight = brightness;
+    }
 
     /* The boot ROM's locked-device payload deliberately disables both
      * pixel layers and leaves the LTDC enabled with Layer 1's default
@@ -1981,7 +2002,7 @@ static void gnw_h7b0_ltdc_update_display(void *opaque)
         uint32_t vend = (s->active_l1wvpcr >> 16) & 0x07ff;
         int scan_width = hend > hstart ? hend - hstart : 320;
         int scan_height = vend > vstart ? vend - vstart : 240;
-        uint32_t color = s->active_l1dccr;
+        uint32_t color = gnw_h7b0_ltdc_dim(s->active_l1dccr, brightness);
 
         if (surface_bits_per_pixel(surface) == 32) {
             if (scan_width * GNW_H7B0_LTDC_SCALE != surface_width(surface) ||
@@ -2058,7 +2079,8 @@ static void gnw_h7b0_ltdc_update_display(void *opaque)
                           (hwaddr)y * GNW_H7B0_LTDC_SCALE * surface_stride(surface);
 
         for (int x = 0; x < width; x++) {
-            uint32_t px = buf[y * width + x];
+            uint32_t px = brightness == 4095 ? buf[y * width + x] :
+                gnw_h7b0_ltdc_dim(buf[y * width + x], brightness);
             for (int sy = 0; sy < GNW_H7B0_LTDC_SCALE; sy++) {
                 uint32_t *drow = (uint32_t *)(drow0 +
                                               (hwaddr)sy * surface_stride(surface));

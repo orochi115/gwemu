@@ -1565,6 +1565,8 @@ static void gnw_h7b0_soc_realize(DeviceState *dev_soc, Error **errp)
         return;
     }
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->dac1), 0, DAC1_BASE_ADDRESS);
+    s->ltdc.backlight_gpio = &s->gpio;
+    s->ltdc.backlight_dac = &s->dac1;
 
     if (!sysbus_realize(SYS_BUS_DEVICE(&s->dac2), errp)) {
         return;
