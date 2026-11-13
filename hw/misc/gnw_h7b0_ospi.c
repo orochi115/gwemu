@@ -386,6 +386,13 @@ static uint8_t ospi_gen_read_byte(GnwH7B0OspiState *s, uint32_t pos)
                 ospi_chip(s)->profile == GNW_NOR_PROFILE_SPANSION_32) ? 0x02 : 0;
     case OSPI_CMD_SFDP:
         return ospi_sfdp_byte(s, s->pending_addr + pos);
+    /* Stock OFW reads its authenticated settings with 0x6b (1-1-4),
+     * while Retro-Go normally uses 0xeb/0xec (1-4-4). All standard
+     * array-read commands share this functional byte stream. Returning
+     * zero for the other bus-width variants makes valid settings appear
+     * corrupt and forces PRESS TIME / 12:00 on every launch. */
+    case 0x03: case 0x0B: case 0x3B: case 0x6B: case 0xBB:
+    case 0x13: case 0x0C: case 0x3C: case 0x6C: case 0xBC:
     case 0xEB:
     case 0xEC: {
         uint64_t off = s->pending_addr + pos;
@@ -413,9 +420,13 @@ static bool ospi_expected_adsize(GnwH7B0OspiState *s, uint8_t instr,
                                   uint32_t *adsize)
 {
     switch (instr) {
+    case 0x03: case 0x0B: case 0x3B: case 0x6B: case 0xBB:
     case OSPI_CMD_SFDP:
     case OSPI_CMD_RDAR:
         *adsize = OSPI_ADSIZE_24B;
+        return true;
+    case 0x13: case 0x0C: case 0x3C: case 0x6C: case 0xBC:
+        *adsize = OSPI_ADSIZE_32B;
         return true;
     default:
         if (instr == ospi_chip_read_opcode(s) ||

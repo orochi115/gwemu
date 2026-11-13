@@ -27,12 +27,12 @@
  * zero, never interrupts), the ISR never fires and boot hangs forever
  * in that wait.
  *
- * NOT modeled: DES/TDES/CCM algorithms (this firmware family only
- * uses AES-GCM at this boot stage; add if a future divergence needs
- * them), DMA-driven DIN/DOUT (DMACR is a plain shadow), 16/8/1-bit
- * DATATYPE swap modes (only the 32-bit/no-swap mode observed live on
- * real hardware is implemented; others log unimplemented and pass
- * data through unswapped), and the CSGCMCCMxR/CSGCMxR context-swap
+ * DATATYPE implements no-swap, halfword, byte and bit reversal on
+ * DIN/DOUT; keys and IVs retain their register byte order. GCM FINAL
+ * length words bypass DATATYPE as on H7 rev.B and above.
+ *
+ * NOT modeled: DES/TDES algorithms, DMA-driven DIN/DOUT (DMACR is a
+ * plain shadow), and the CSGCMCCMxR/CSGCMxR context-swap
  * registers (plain shadow -- only needed if firmware suspends and
  * resumes a GCM operation across an unrelated CRYP use, not observed
  * in this boot path).

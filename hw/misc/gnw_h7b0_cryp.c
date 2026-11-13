@@ -24,6 +24,7 @@
 
 #include "qemu/osdep.h"
 #include "qemu/log.h"
+#include "qemu/host-utils.h"
 #include "migration/vmstate.h"
 #include "hw/core/irq.h"
 #include "hw/misc/gnw_h7b0_cryp.h"
@@ -328,6 +329,25 @@ static void block_to_words4(const uint8_t block[16], uint32_t w[4])
 /* ------------------------------------------------------------------ */
 /* Device model.                                                      */
 /* ------------------------------------------------------------------ */
+
+/* DATATYPE transforms the data FIFO words, never the key or IV file.
+ * Stock Zelda selects byte swapping; treating those words as no-swap
+ * decrypts valid settings into garbage and forces first-boot setup. */
+static uint32_t gnw_h7b0_cryp_swap_data(GnwH7B0CrypState *s, uint32_t word)
+{
+    uint32_t cr = s->regs[GNW_H7B0_CRYP_CR >> 2];
+
+    switch ((cr & CRYP_CR_DATATYPE_MASK) >> CRYP_CR_DATATYPE_SHIFT) {
+    case 1:
+        return (word << 16) | (word >> 16);
+    case 2:
+        return bswap32(word);
+    case 3:
+        return revbit32(word);
+    default:
+        return word;
+    }
+}
 
 static void gnw_h7b0_cryp_update_irq(GnwH7B0CrypState *s)
 {
@@ -704,7 +724,7 @@ static uint64_t gnw_h7b0_cryp_read(void *opaque, hwaddr addr, unsigned int size)
         } else {
             val = 0;
         }
-        return val;
+        return gnw_h7b0_cryp_swap_data(s, val);
     }
 
     return s->regs[addr >> 2];
@@ -840,7 +860,17 @@ static void gnw_h7b0_cryp_write(void *opaque, hwaddr addr,
                           "%s: DIN write while CRYPEN=0, ignoring\n", __func__);
             return;
         }
-        s->din_words[s->din_count++] = value;
+        /* H7 rev.B+ consumes the GCM FINAL length block in native word
+         * order regardless of DATATYPE. HAL_CRYPEx_AESGCM_GenerateAuthTAG
+         * explicitly submits unswapped lengths for this revision; applying
+         * the payload swap here produces an invalid authentication tag. */
+        if (algomode == CRYP_CR_ALGOMODE_AES_GCM &&
+            ((cr & CRYP_CR_GCM_CCMPH_MASK) >> CRYP_CR_GCM_CCMPH_SHIFT) ==
+            CRYP_GCM_CCMPH_FINAL) {
+            s->din_words[s->din_count++] = value;
+        } else {
+            s->din_words[s->din_count++] = gnw_h7b0_cryp_swap_data(s, value);
+        }
         if (s->din_count < 4) {
             return;
         }
