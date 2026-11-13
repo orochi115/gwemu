@@ -1930,7 +1930,7 @@ if test "$skip_meson" = no; then
   # this entry the sdl3 subproject failed with "Unable to find CMake"
   # and (pre-guardrail) shipped a GUI-less binary (v0.0.10 macOS).
   if has cmake; then
-    echo "cmake = [$(meson_quote $(command -v cmake))]" >> $cross
+    echo "cmake = [$(meson_quote $(if test "$host_os" = windows; then cygpath -m "$(command -v cmake)"; else command -v cmake; fi))]" >> $cross
   fi
   echo "strip = [$(meson_quote $strip)]" >> $cross
   echo "widl = [$(meson_quote $widl)]" >> $cross
@@ -1957,7 +1957,7 @@ if test "$skip_meson" = no; then
     # See the cross-file cmake entry above -- keep the native file
     # consistent so build-machine cmake lookups can't diverge.
     if has cmake; then
-      echo "cmake = [$(meson_quote $(command -v cmake))]" >> $native
+      echo "cmake = [$(meson_quote $(if test "$host_os" = windows; then cygpath -m "$(command -v cmake)"; else command -v cmake; fi))]" >> $native
     fi
     mv $native config-meson.native
     meson_option_add --native-file

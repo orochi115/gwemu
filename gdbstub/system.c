@@ -14,6 +14,7 @@
 #include "qapi/error.h"
 #include "qemu/error-report.h"
 #include "qemu/cutils.h"
+#include "qemu/timer.h"
 #include "exec/gdbstub.h"
 #include "gdbstub/syscalls.h"
 #include "gdbstub/commands.h"
@@ -41,6 +42,20 @@ typedef struct {
 GDBSystemState gdbserver_system_state;
 
 static bool gdb_stop_on_connect = true;
+/* The desktop's private Windows GDB endpoint is authenticated independently
+ * of the RPC lease. Do not attach/halt or feed RSP until its secret matches. */
+static char *gdb_connection_token;
+static uint8_t gdb_token_input[64];
+static size_t gdb_token_received;
+static bool gdb_authenticated;
+static QEMUTimer *gdb_auth_timer;
+
+static void gdb_auth_expired(void *opaque)
+{
+    if (!gdb_authenticated) {
+        qemu_chr_fe_disconnect(&gdbserver_system_state.chr);
+    }
+}
 
 void gdb_set_stop_on_connect(bool stop)
 {
@@ -110,24 +125,37 @@ static void gdb_chr_event(void *opaque, QEMUChrEvent event)
     int i;
     GDBState *s = (GDBState *) opaque;
 
-    switch (event) {
-    case CHR_EVENT_OPENED:
-        /* Start with first process attached, others detached */
-        for (i = 0; i < s->process_num; i++) {
-            s->processes[i].attached = !i;
+    if (event == CHR_EVENT_CLOSED) {
+        if (gdb_auth_timer) {
+            timer_del(gdb_auth_timer);
         }
-
-        s->c_cpu = gdb_first_attached_cpu();
-        s->g_cpu = s->c_cpu;
-
-        if (gdb_stop_on_connect) {
-            vm_stop(RUN_STATE_PAUSED);
-        }
-        replay_gdb_attached();
-        break;
-    default:
-        break;
+        gdb_authenticated = false;
+        gdb_token_received = 0;
+        s->state = RS_IDLE;
+        s->line_buf_index = 0;
+        s->allow_stop_reply = false;
+        return;
     }
+    if (event != CHR_EVENT_OPENED) {
+        return;
+    }
+    if (gdb_connection_token && !gdb_authenticated) {
+        gdb_token_received = 0;
+        timer_mod(gdb_auth_timer, qemu_clock_get_ms(QEMU_CLOCK_REALTIME) + 2000);
+        return;
+    }
+    /* Start with first process attached, others detached. */
+    for (i = 0; i < s->process_num; i++) {
+        s->processes[i].attached = !i;
+    }
+    s->state = RS_IDLE;
+    s->line_buf_index = 0;
+    s->c_cpu = gdb_first_attached_cpu();
+    s->g_cpu = s->c_cpu;
+    if (gdb_stop_on_connect) {
+        vm_stop(RUN_STATE_PAUSED);
+    }
+    replay_gdb_attached();
 }
 
 /*
@@ -295,6 +323,26 @@ static void gdb_chr_receive(void *opaque, const uint8_t *buf, int size)
     int i;
 
     for (i = 0; i < size; i++) {
+        if (gdb_connection_token && !gdb_authenticated) {
+            gdb_token_input[gdb_token_received++] = buf[i];
+            if (gdb_token_received == sizeof(gdb_token_input)) {
+                uint8_t difference = 0;
+                size_t n;
+                for (n = 0; n < sizeof(gdb_token_input); n++) {
+                    difference |= gdb_token_input[n] ^ gdb_connection_token[n];
+                }
+                memset(gdb_token_input, 0, sizeof(gdb_token_input));
+                if (difference) {
+                    gdb_token_received = 0;
+                    qemu_chr_fe_disconnect(&gdbserver_system_state.chr);
+                    return;
+                }
+                gdb_authenticated = true;
+                timer_del(gdb_auth_timer);
+                gdb_chr_event(opaque, CHR_EVENT_OPENED);
+            }
+            continue;
+        }
         gdb_read_byte(buf[i]);
     }
 }
@@ -377,6 +425,25 @@ bool gdbserver_start(const char *device, Error **errp)
         error_setg(errp, "gdbstub: missing connection string");
         return false;
     }
+
+    const char *token = g_getenv("GWEMU_GDB_TOKEN");
+    if (token) {
+        if (strlen(token) != 64 || strspn(token, "0123456789abcdef") != 64 ||
+            !g_str_has_prefix(device, "tcp:127.0.0.1:")) {
+            error_setg(errp, "GWEMU_GDB_TOKEN requires a 64-character lowercase "
+                       "hex secret and a loopback TCP GDB endpoint");
+            return false;
+        }
+    }
+    g_free(gdb_connection_token);
+    gdb_connection_token = g_strdup(token);
+    if (gdb_auth_timer) {
+        timer_del(gdb_auth_timer);
+    } else if (token) {
+        gdb_auth_timer = timer_new_ms(QEMU_CLOCK_REALTIME, gdb_auth_expired, NULL);
+    }
+    gdb_authenticated = false;
+    gdb_token_received = 0;
 
     trace_gdbstub_op_start(cs->str);
 
