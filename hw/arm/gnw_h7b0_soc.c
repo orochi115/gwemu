@@ -468,8 +468,10 @@ static bool gnw_h7b0_init_ram_from_file_win32(MemoryRegion *mr, Object *owner,
                                                const char *image_path,
                                                Error **errp)
 {
+    /* State restore opens the same mapped file for a durability flush.
+     * Session ownership is enforced separately by the board session lock. */
     HANDLE file = CreateFileA(image_path, GENERIC_READ | GENERIC_WRITE,
-                               FILE_SHARE_READ, NULL, OPEN_ALWAYS,
+                               FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_ALWAYS,
                                FILE_ATTRIBUTE_NORMAL, NULL);
     if (file == INVALID_HANDLE_VALUE) {
         error_setg(errp, "%s: CreateFileA(\"%s\") failed (error %lu)",
